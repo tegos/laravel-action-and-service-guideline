@@ -1,5 +1,7 @@
 # Laravel Action and Service Guidelines
 
+![Laravel Action and Service Guidelines](assets/poster.jpg)
+
 A clean, scalable architecture for organizing business logic in PHP applications using Action and Service patterns.
 
 ## Overview
