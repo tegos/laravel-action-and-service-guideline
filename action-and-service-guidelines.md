@@ -308,8 +308,7 @@ final class DeliveryScheduleService
 | Testability        | Integration tests             | Unit tests                 |
 | Complexity         | High (orchestration)          | Low-Medium (specific task) |
 
-
-![Action and Service Flow](action-and-service-flowchart.png)
+![Action and Service Flow](assets/action-and-service-flowchart.svg)
 
 ## Action Composition & Splitting
 

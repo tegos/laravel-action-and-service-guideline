@@ -50,11 +50,11 @@ TehnomirApi
 
 ```
 app/
-├── Actions/    # Where all the real business magic happens
+├── Actions/    # Complete business operations
 │   ├── Cart/
 │   ├── Order/
 │   └── Search/
-├── Services/   # Your Swiss Army knife for reusable logic
+├── Services/   # Reusable business logic
 │   ├── Cart/
 │   ├── Order/
 │   └── External/
@@ -73,8 +73,6 @@ app/
 Use Actions when orchestrating workflows or business processes initiated by user requests. Services are best for logic,
 validation, or calculations that need to be reused across multiple features. This separation improves maintainability
 and clarity in project organization.
-
-![Action and Service Flow](action-and-service-flowchart.png)
 
 ## Naming Conventions (Because Names Actually Matter)
 
