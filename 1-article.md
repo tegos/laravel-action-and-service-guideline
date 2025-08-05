@@ -116,8 +116,7 @@ final class DeliveryScheduleService
   - Design for reuse across Actions or contexts.
   - You should be able to write a unit test for it without wanting to throw your laptop out the window.
 
-In short: Services are your go-to for calculation, validating cart items, normalizing data, figuring out delivery dates, formatting
-API payloads, and messing with third-party systems. They provide reusable building blocks for Actions and keep your codebase modular and testable.
+In short: Services are your go-to for calculation, validating cart items, normalizing data, figuring out delivery dates, formatting API payloads, and messing with third-party systems. They provide reusable building blocks for Actions and keep your codebase modular and testable.
 
 ## Organizing and Composing
 
@@ -191,14 +190,11 @@ final class OrderController extends Controller
 
 Bare minimum in the controller - just enough to grab what you need, delegate it to an Action, and wrap up the response. No one wants to scroll through a controller that looks like War and Peace.
 
-Oh, and those exceptions like `UserCheckException`? Actions throw them, and some global handler swoops in to catch them
-and spit out a tidy JSON error. You don't need to clutter up your controller with try/catch gymnastics - just let the framework do its thing.
+Oh, and those exceptions like `UserCheckException`? Actions throw them, and some global handler swoops in to catch them and spit out a tidy JSON error. You don't need to clutter up your controller with try/catch gymnastics - just let the framework do its thing.
 
 ## Why This Approach?
 
-This approach has brought consistency to my Laravel projects. Nuno Maduro dropped some gems in [_Actions in Laravel Cloud_](https://youtube.com/shorts/wD1DAeRQ778) about how keeping things uniform makes it way less painful
-to get new folks up to speed-or just to remember what the heck you wrote three months ago. Actions handle operations with side effects, while Services provide stateless reusable utilities. 
-This isn't DDD-it's just a pragmatic setup, tailored for clarity and scalability.
+This approach has brought consistency to my Laravel projects. Nuno Maduro dropped some gems in [_Actions in Laravel Cloud_](https://youtube.com/shorts/wD1DAeRQ778) about how keeping things uniform makes it way less painful to get new folks up to speed-or just to remember what the heck you wrote three months ago. Actions handle operations with side effects, while Services provide stateless reusable utilities. This isn't DDD-it's just a pragmatic setup, tailored for clarity and scalability.
 
 ## Best Practices
 
@@ -215,4 +211,4 @@ For simple CRUD operations with minimal logic (e.g., fetching a single record) d
 ## Wrapping Up
 
 Actions and Services have streamlined my Laravel development, balancing simplicity and scalability. Actions encapsulate operations, while Services provide reusable logic, creating a maintainable codebase. It's opinionated, sure – but it works for my crew.
-Take it, tweak it, or toss it, whatever fits your vibe. Check the full guidelines on [GitHub](https://github.com/tegos/laravel-action-and-service-guideline). Try this approach in your next Laravel project and share your experience in the comments. Have a different way to organize business logic? Let’s hear it!
+Take it, tweak it, or toss it, whatever fits your vibe. Check the full guidelines on [GitHub](https://github.com/tegos/laravel-action-and-service-guideline/blob/main/action-and-service-guidelines.md). Try this approach in your next Laravel project and share your experience in the comments. Have a different way to organize business logic? Let’s hear it!
