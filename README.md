@@ -117,4 +117,5 @@ public function store(OrderStoreRequest $request, OrderCreateAction $action): Or
 ## Learn More
 
 - [Full Guidelines](action-and-service-guidelines.md) - Complete guide
+- [Laravel Actions and Services](https://dev.to/tegos/laravel-actions-and-services-360d) - Article
 
