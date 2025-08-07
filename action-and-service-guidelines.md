@@ -255,6 +255,7 @@ final class OrderCreateAction implements Actionable
             $cartItems = $this->cartItemFetchAction->handle($dto->userId);
             $order = $this->orderRepository->create($dto);
             $this->notificationAction->handle($order);
+            
             return $order;
         });
     }
@@ -276,6 +277,7 @@ final class DeliveryScheduleService
     {
         // Pure function to calculate delivery schedule based on rules
         $schedule = $this->applySupplierRules($orderDate, $supplierRules);
+        
         return $schedule;
     }
     
@@ -286,7 +288,7 @@ final class DeliveryScheduleService
 }
 ```
 
-## Quick Decision Framework
+## Quick Decision: Action or Service?
 
 ### 🤔 **Ask Yourself:**
 
@@ -299,16 +301,29 @@ final class DeliveryScheduleService
 
 ### 📊 **Decision Matrix:**
 
-| Characteristic     | Action                        | Service                    |
-|--------------------|-------------------------------|----------------------------|
-| Reusability        | Single use                    | Multiple uses              |
-| Side Effects       | Yes (e.g., notifications)     | No (e.g., calculations)    |
-| Business Operation | Complete (e.g., create order) | Partial (e.g., validate)   |
-| Triggered By       | User/Event                    | Other code                 |
-| Testability        | Integration tests             | Unit tests                 |
-| Complexity         | High (orchestration)          | Low-Medium (specific task) |
+| Characteristic         | Action                                                          | Service                                                              |
+|------------------------|-----------------------------------------------------------------|----------------------------------------------------------------------|
+| **Primary Purpose**    | Execute complete business operations                            | Provide reusable business logic and utilities                        |
+| **Scope**              | End-to-end business process (create order, process checkout)    | Single responsibility within domain (validate, calculate, transform) |
+| **Reusability**        | Usually one-off, context-specific                               | Designed for reuse across multiple actions/contexts                  |
+| **Side Effects**       | Often has side effects (notifications, logging, cache clearing) | Pure/stateless operations with no side effects                       |
+| **Business Flow**      | Complete start-to-finish thing                                  | Partial step, not the whole journey                                  |
+| **What Triggers It?**  | User, events, HTTP calls                                        | Other code calls it (like Actions or other Services)                 |
+| **Complexity Level**   | High - orchestrates multiple steps/components                   | Low to Medium - focused on specific task                             |
+| **How Do You Run It?** | `handle()` is your go-to                                        | Multiple public methods, pick your poison                            |
+| **Laravel Style**      | Call it straight from your controller                           | Inject it into Actions                                               |
+| **Where's the Logic?** | Coordinates the business process                                | Holds the domain-specific know-how                                   |
 
-![Action and Service Flow](assets/action-and-service-flowchart.svg)
+### Examples: actions and services
+
+| **Actions: Complete Business Operations**                                                     | **Services: Reusable Business Logic**                                        |
+|-----------------------------------------------------------------------------------------------|------------------------------------------------------------------------------|
+| **OrderCreateAction** - Creates an order, handles payment, inventory, fires off notifications | **CartItemValidator** - Checks if cart items play by your business rules     |
+| **CartCheckoutPossibilityAction** - Can you check out? Picks delivery dates                   | **DeliveryScheduleService** - Figures out delivery dates from supplier logic |
+| **VehicleFindByVinAction** - Digs through APIs, normalizes, caches                            | **PartNameNormalizerAI** - Makes part names less weird with some AI magic    |
+| **PriceImportUploadAction** - Handles file uploads, catches duplicates                        | **TehnomirApi** - Talks to external APIs and deals with their messiness      |
+| **SearchBrandGroupingAction** - Runs search, filters, groups brands                           | **SearchResultService** - Cleans up and tweaks your search results           |
+| **StatMetricDailyCollectAction** - Scoops up metrics, stores them, fires off reports          | **OrderConditionService** - Calculates discounts, shipping, payment terms    |
 
 ## Action Composition & Splitting
 
@@ -424,6 +439,7 @@ final class OrderController extends Controller
             directionTypeId: $validatedInput->input('direction_type_id')
         );
         $order = $orderCreateAction->handle($orderCreateDTO, $user->id);
+        
         return OrderResource::make($order);
     }
 }
@@ -484,6 +500,7 @@ class BusinessRenderException extends BusinessException implements HttpException
     ) {
         $this->statusCode = $statusCode;
         $userMessage = $messageKey ? __($messageKey) : $userMessage;
+        
         parent::__construct($userMessage);
     }
 

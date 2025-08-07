@@ -16,13 +16,51 @@ And no, I'm not trying to cosplay as Domain-Driven Design purists. It's simply a
 ## Why Actions and Services?
 
 Okay, so here's the deal - Laravel is super flexible. Like, to the point where you could toss your business logic just about anywhere and nobody would blink... until your project turns into a spaghetti monster.
-Joel Clermont totally nails this in [_Where should you put your business logic?_](https://masteringlaravel.io/daily/2025-05-21-where-should-you-put-your-business-logic). Laravel's freedom is double-edged.
-My take? Split your logic into Actions (for the big-picture stuff) and Services (for the repeatable, "stateless" bits). This isn't just some random idea - Nuno Maduro's all about it in [_Laravel Actions: The Secret Sauce_](https://youtu.be/r1480BoFulQ).
+Joel Clermont totally nails this in [_Where should you put your business logic?_](https://masteringlaravel.io/daily/2025-05-21-where-should-you-put-your-business-logic). Freedom’s fun, but man, it bites back.
+Here's my two cents: split your logic into Actions (for the big-picture stuff) and Services (for the repeatable, "stateless" bits). This isn't just some random idea - Nuno Maduro's all about it in [_Laravel Actions: The Secret Sauce_](https://youtu.be/r1480BoFulQ).
 Actions are context-free; doesn't matter if you're hitting HTTP, console, or some background job, the code stays consistent. Super handy and ensuring consistency as teams scale.
 
-Need a cheat sheet for where logic belongs? Here's a quick flowchart to keep you from losing your mind:
+## Quick Decision: Action or Service?
 
-![Action and Service Flowchart](assets/action-and-service-flowchart.svg)
+### 🤔 **Ask Yourself:**
+
+1. **Is this an entire business thing?** → Action (e.g., `OrderCreateAction`).
+2. **Gonna reuse this in a bunch of places?** → Service (e.g., `CartItemValidator`).
+3. **Does it mess with the outside world: notifications, logs, whatever?** → Action (e.g., `OrderIssueNotificationAction`).
+4. **Is this pure data processing or calculation?** → Service (e.g., `DeliveryScheduleService`).
+5. **Is this triggered by user/event?** → Action (e.g., `CartItemAddAction`).
+6. **Is this domain-specific logic or infrastructure?** → Service (e.g., `TehnomirApi`).
+
+{% details **Decision Matrix** %}
+
+| Characteristic         | Action                                                          | Service                                                              |
+|------------------------|-----------------------------------------------------------------|----------------------------------------------------------------------|
+| **Primary Purpose**    | Execute complete business operations                            | Provide reusable business logic and utilities                        |
+| **Scope**              | End-to-end business process (create order, process checkout)    | Single responsibility within domain (validate, calculate, transform) |
+| **Reusability**        | Usually one-off, context-specific                               | Designed for reuse across multiple actions/contexts                  |
+| **Side Effects**       | Often has side effects (notifications, logging, cache clearing) | Pure/stateless operations with no side effects                       |
+| **Business Flow**      | Complete start-to-finish thing                                  | Partial step, not the whole journey                                  |
+| **What Triggers It?**  | User, events, HTTP calls                                        | Other code calls it (like Actions or other Services)                 |
+| **Complexity Level**   | High - orchestrates multiple steps/components                   | Low to Medium - focused on specific task                             |
+| **How Do You Run It?** | `handle()` is your go-to                                        | Multiple public methods, pick your poison                            |
+| **Laravel Style**      | Call it straight from your controller                           | Inject it into Actions                                               |
+| **Where's the Logic?** | Coordinates the business process                                | Holds the domain-specific know-how                                   |
+
+
+{% enddetails %}
+
+{% details **Examples: actions and services** %}
+
+| **Actions: Complete Business Operations**                                                     | **Services: Reusable Business Logic**                                        |
+|-----------------------------------------------------------------------------------------------|------------------------------------------------------------------------------|
+| **OrderCreateAction** - Creates an order, handles payment, inventory, fires off notifications | **CartItemValidator** - Checks if cart items play by your business rules     |
+| **CartCheckoutPossibilityAction** - Can you check out? Picks delivery dates                   | **DeliveryScheduleService** - Figures out delivery dates from supplier logic |
+| **VehicleFindByVinAction** - Digs through APIs, normalizes, caches                            | **PartNameNormalizerAI** - Makes part names less weird with some AI magic    |
+| **PriceImportUploadAction** - Handles file uploads, catches duplicates                        | **TehnomirApi** - Talks to external APIs and deals with their messiness      |
+| **SearchBrandGroupingAction** - Runs search, filters, groups brands                           | **SearchResultService** - Cleans up and tweaks your search results           |
+| **StatMetricDailyCollectAction** - Scoops up metrics, stores them, fires off reports          | **OrderConditionService** - Calculates discounts, shipping, payment terms    |
+
+{% enddetails %}
 
 ## Actions: Focused Business Operations
 
@@ -57,9 +95,11 @@ final class OrderCreateAction
     public function handle(OrderCreateDTO $dto, int $userId): Order
     {
         $this->orderConditionService->validate($dto);
+        
         return DB::transaction(function () use ($dto, $userId) {
             $order = $this->orderRepository->create($dto, $userId);
             $this->notificationAction->handle($order);
+            
             return $order;
         });
     }
@@ -183,6 +223,7 @@ final class OrderController extends Controller
             directionTypeId: $validatedInput->input('direction_type_id')
         );
         $order = $orderCreateAction->handle($orderCreateDTO, $user->id);
+        
         return OrderResource::make($order);
     }
 }
