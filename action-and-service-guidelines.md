@@ -2,80 +2,139 @@
 
 ## Overview
 
-This guideline defines when to use **Actions** and **Services** in your PHP application, provides naming conventions,
-and outlines best practices for organizing and implementing them. The goal is to ensure consistency, maintainability,
-and scalability in your codebase.
+This guideline defines when to use **Actions** and **Services** in a Laravel application, provides naming conventions,
+and outlines practices for organizing and implementing them. The goal is consistency, maintainability, and a codebase
+where any developer can predict where a piece of logic lives and how it is invoked.
+
+## The Core Rule: Direction Decides It
+
+Before any checklist or matrix, there is one rule that the codebase actually obeys:
+
+- **An Action is an entry point.** It is the unit a controller, console command, queued job, or event handler invokes
+  to run one complete operation. Its main entry method is `handle()`.
+- **A Service is a collaborator.** It is invoked **by** Actions (or by other Services, occasionally by a thin
+  controller) to do one focused piece of work: calculate, validate, transform, format, or wrap a single external call.
+- **Direction decides it.** Outside code triggers it as a whole operation, it is an Action. Other code reaches into it
+  mid-operation, it is a Service. The normal wiring is `controller -> Action -> Services`.
+
+### The one hard invariant
+
+**Services never call Actions, and never dispatch jobs or events.** This is the single guarantee the codebase
+enforces (verified: zero references to the `App\Actions` namespace and zero `dispatch(` calls under `app/Services`).
+If a class needs to trigger another business operation, fire a notification, or dispatch a job/event, it is an Action,
+not a Service. Everything else below is guidance; this one is a rule.
+
+## What a Service Actually Is
+
+A Service in this codebase is **a non-Action, non-Controller collaborator under `app/Services`**. In practice it spans
+several shapes, and most are not pure or stateless. Be honest about this so the guidance matches reality:
+
+- **Pure calculators / transformers** (e.g. `CartService`, `SupplierDisplayQuantityService`,
+  `RelatedArticleChainBuilder`, the `PartName` post-processors). The smallest, most testable group.
+- **Validators** (e.g. `CartItemValidator`, `SearchDetailValidator`, `OrderCourierDateValidator`). Return `void`,
+  throw on failure. Some are pure; some read the DB. A DB-reading validator is still a Service.
+- **External API clients** (e.g. `SupplierApi`, `OeCatalogApi`, `Erp1CApi`, `NovaPoshtaApi`, `OpendatabotApi`,
+  `PartNameNormalizerAI`). Heavy IO: HTTP calls, credentials, caching, stats increments, exception reporting.
+- **DB-backed orchestrators / collectors** (e.g. `ProductSearchService`, `CartImportService`, `SupplierService`,
+  the image services that write models and touch the filesystem).
+- **Cache / infra helpers** (e.g. `SearchArticleCacheService`, `OrderPrimaryKeyGenerator`, `GeoIpService`).
+
+**Prefer stateless, side-effect-free Services where you can** - the pure calculators are the easiest to test and
+reuse. But IO-heavy Services are fine and normal. A Service may freely do DB reads/writes, HTTP, cache, filesystem,
+logging, or external AI calls. What it must never do is orchestrate a full operation by calling Actions or dispatching
+jobs/events. That is the line, not purity.
+
+### A note on state and input mutation
+
+- **Prefer no instance state.** Most calculators are stateless. But some infra Services legitimately hold state:
+  `SupplierApi` carries a mutable `$cacheEnabled` flag with fluent `enableCache()` / `disableCache()` toggles,
+  `HttpClientLogBuffer` holds a `static array $entries` flushed to the DB, `CalculationLoggerService` accumulates
+  `$loggedKeys` across calls. These are acceptable for infrastructure concerns.
+- **Distinguish "no instance state" from "no input mutation."** Mutating a DTO argument in place is a separate, more
+  surprising side effect. `SupplierDisplayQuantityService` currently sets `detailSupplierDTO->displayQuantity` on the
+  argument it receives. Prefer returning new values over mutating passed DTOs, and keep DTOs read-only inside Services
+  where practical.
 
 ## When to Use Actions and Services
 
-### **Use Actions When:**
+### Use Actions When:
 
-- **Complete business operations** with clear start/end boundaries (e.g., creating an order, canceling an item).
-- **Command-like operations** triggered by user actions or system events (e.g., user login, search query logging).
-- **Orchestrating multiple services or sub-actions** to achieve a business goal (e.g., processing a search with filters
+- **Complete business operations** with clear start/end boundaries (e.g. creating an order, canceling an item).
+- **Command-like operations** triggered by a user action or system event (e.g. user login, search query logging).
+- **Orchestrating multiple services or sub-actions** toward a business goal (e.g. processing a search with filters
   and sorting).
-- **Transactional workflows** requiring atomicity (e.g., creating an order with database transactions).
-- **Single-use operations** specific to one context or controller (e.g., deleting a banner directory).
-- **Operations with side effects** such as notifications, logging, or cache clearing (e.g., sending order issue
-  notifications).
-- **Complex business processes** involving multiple steps (e.g., processing a cart checkout).
+- **Transactional workflows** requiring atomicity (e.g. creating an order inside a DB transaction).
+- **Operations that dispatch** notifications, jobs, or events, or that own the transaction. This is the hard signal.
+- **Complex multi-step business processes** (e.g. a cart checkout).
 
 **Examples:**
 
 ```php
-OrderCreateAction                     // Creates an order with multiple steps
+OrderCreateAction                     // Creates an order across multiple steps
 SearchAction                          // Orchestrates search with filtering and sorting
 CartItemAddAction                     // Adds an item to the cart
 CommunicationCloseConversationAction  // Closes a user conversation
 PriceExportDownloadAction             // Downloads exported price data
 ```
 
-### 🔧 **Use Services When:**
+### Use Services When:
 
-- **Reusable business logic** used across multiple actions or contexts (e.g., calculating delivery schedules).
-- **Domain-specific calculations** or transformations (e.g., normalizing part names).
-- **Stateless utilities** with no side effects (e.g., validating cart items).
-- **Data processing or formatting** operations (e.g., transforming search results).
-- **Cross-cutting concerns** like validation, logging, or API interactions (e.g., interfacing with external APIs).
-- **Pure functions** that produce consistent output for the same input (e.g., price calculations).
-- **Infrastructure operations** like API calls or data synchronization (e.g., syncing search indices).
+- **Reusable business logic** used across multiple actions or contexts (e.g. calculating delivery schedules).
+- **Domain-specific calculations or transformations** (e.g. normalizing part names).
+- **Validation** of input or state (e.g. validating cart items). May be pure or DB-backed.
+- **Data processing or formatting** (e.g. transforming search results).
+- **Wrapping a single external call** (e.g. one API client per upstream system).
+- **Focused infrastructure** like cache helpers or ID generators.
+
+Note: a side effect alone does not make something an Action. A Service may do IO (DB, HTTP, cache, files, logs). What
+makes a class an Action is dispatching a job/event, sending notifications, or owning the transaction. `SupplierApi`
+does heavy IO and is still a Service, because it wraps one upstream and never orchestrates or dispatches.
 
 **Examples:**
 
 ```php
-CartItemValidator                   // Validates cart items
-DeliveryScheduleService             // Calculates delivery schedules
+CartItemValidator                   // Validates cart items (pure)
+OrderCourierDateValidator           // Validates courier dates (reads the DB - still a Service)
+DeliveryScheduleService             // Calculates delivery dates from supplier rules
 SearchResultService                 // Processes search results
-TehnomirApi                         // Handles external API interactions
-PartNameNormalizerAI                // Normalizes part names
+SupplierApi                         // Wraps one external API
+PartNameNormalizerAI                // Normalizes part names via an external AI call
 ```
+
+### The wrapper-vs-orchestrator split
+
+This is the distinction that actually separates an API Service from an Action that uses APIs:
+
+- **Wraps a single external call** -> Service: `SupplierApi`, `OeCatalogApi`, `GeoIpService`.
+- **Orchestrates an end-to-end external operation** built from those wrappers -> Action: `VehicleFindByVinAction`
+  (calls several API clients, normalizes, caches, returns a result for the controller).
 
 ## Action Naming Conventions
 
-### 📝 **General Pattern:**
+### General Pattern:
 
 ```
 [Domain][Object][Verb]Action
 ```
 
-- **Domain**: The business context (e.g., `Order`, `Cart`, `Search`).
-- **Object**: The entity being acted upon, if applicable (e.g., `Item`, `Cart`, `Query`).
-- **Verb**: The action being performed (e.g., `Create`, `Cancel`, `Fetch`).
-- **Suffix**: Always end with `Action`.
+- **Domain**: the business context (e.g. `Order`, `Cart`, `Search`).
+- **Object**: the entity being acted upon, if applicable (e.g. `Item`, `Cart`, `Query`).
+- **Verb**: the action being performed (e.g. `Create`, `Cancel`, `Fetch`).
+- **Suffix**: always end with `Action`.
 
-### ✅ **Good Examples:**
+### Good Examples:
 
-#### **CRUD Operations:**
+#### CRUD Operations:
 
 ```php
 OrderCreateAction                   // Creates an order
-OrderIndexAction                    // List orders
+OrderIndexAction                    // Lists orders
 CartDestroyAction                   // Deletes a cart
 SupplierUpdateAction                // Updates supplier details
 UserProfileAction                   // Retrieves user profile
 ```
 
-#### **Domain-Specific Operations:**
+#### Domain-Specific Operations:
 
 ```php
 OrderCancelAction                   // Cancels an order
@@ -85,7 +144,7 @@ PriceImportUploadAction             // Uploads price import data
 VehicleFindByVinAction              // Finds a vehicle by VIN
 ```
 
-#### **Complex Operations:**
+#### Complex Operations:
 
 ```php
 OrderCartItemDTOsFetchAction        // Fetches cart item DTOs for an order
@@ -94,54 +153,55 @@ PriceImportHandleDuplicateAction    // Handles duplicate price imports
 StatMetricDailyCollectAction        // Collects daily metrics
 ```
 
-### ❌ **Avoid These Patterns:**
+### Avoid These Patterns:
 
 ```php
 // Too generic
-ProcessAction                       ❌ // Lacks domain context
-HandleAction                        ❌ // Too vague
-ExecuteAction                       ❌ // No clear purpose
+ProcessAction                       // Lacks domain context
+HandleAction                        // Too vague
+ExecuteAction                       // No clear purpose
 
 // Verb-first (inconsistent with domain-first)
-CreateOrderAction                   ❌ // Should be OrderCreateAction
-UpdateSupplierAction                ❌ // Should be SupplierUpdateAction
-SendNotificationAction              ❌ // Should be OrderIssueNotificationAction
+CreateOrderAction                   // Should be OrderCreateAction
+UpdateSupplierAction                // Should be SupplierUpdateAction
+SendNotificationAction              // Should be domain-first, e.g. OrderItemNotifyAction
 
 // Missing domain context
-ItemCancelAction                    ❌ // Should be OrderItemCancelAction
-StatisticAction                     ❌ // Should be StatisticSearchVinDailyAction
+ItemCancelAction                    // Should be OrderItemCancelAction
+StatisticAction                     // Should be StatisticSearchQueryDailyAction
 ```
 
 ## Service Naming Conventions
 
-### 📝 **General Pattern:**
+### General Pattern:
 
 ```
 [Domain][Purpose]Service
 ```
 
-- **Domain**: The business context (e.g., `Order`, `Cart`, `Search`).
-- **Purpose**: The specific function (e.g., `Calculation`, `Validation`, `Api`).
-- **Suffix**: Typically `Service`, but can use `Validator`, `Api`, or other descriptive terms for clarity.
+- **Domain**: the business context (e.g. `Order`, `Cart`, `Search`).
+- **Purpose**: the specific function (e.g. `Calculation`, `Validation`, `Api`).
+- **Suffix**: typically `Service`, but use `Validator`, `Api`, or another descriptive term when it signposts the role.
+  In practice only `*Validator` and `*Api` are reliably signposted; the rest carry `Service` or a domain noun.
 
-### ✅ **Good Examples:**
+### Good Examples:
 
-#### **Calculation Services:**
+#### Calculation Services:
 
 ```php
 DeliveryScheduleService             // Calculates delivery schedules
 ExchangeService                     // Handles currency and exchange rates
 ```
 
-#### **Validation Services:**
+#### Validation Services:
 
 ```php
-CartItemValidator                   // Validates cart items
-RequestReturnQuantityValidator      // Validates return quantities
+CartItemValidator                   // Validates cart items (pure)
+RequestReturnQuantityValidator      // Validates return quantities (reads the DB)
 SearchDetailValidator               // Validates search details
 ```
 
-#### **Data Services:**
+#### Data Services:
 
 ```php
 CartImportService                   // Imports cart data
@@ -150,42 +210,64 @@ InternalPriceExportService          // Exports internal price data
 CalculationLoggerService            // Logs calculations
 ```
 
-#### **Integration Services:**
+#### Integration Services:
 
 ```php
-TehnomirApi                         // Interacts with Tehnomir API
-LaximoApi                           // Interacts with Laximo API
-OpendatabotApi                      // Interacts with Opendatabot API
-Erp1CApi                            // Interacts with ERP 1C system
+SupplierApi                         // Wraps the parts-supplier API
+OeCatalogApi                        // Wraps the OE catalog API
+OpendatabotApi                      // Wraps the Opendatabot API
+Erp1CApi                            // Wraps the ERP 1C system
 ```
 
-#### **Business Logic Services:**
+#### Business Logic Services:
 
 ```php
-OrderConditionService               // Manages order conditions
-SupplierService                     // Handles supplier-related logic
-ProductCrossService                 // Manages product cross-references
+OrderConditionService               // Computes order conditions
+SupplierService                     // Supplier-related logic
+ProductCrossService                 // Product cross-references
 ```
 
-### ❌ **Avoid These Patterns:**
+### Avoid These Patterns:
 
 ```php
 // Too generic
-DataService                         ❌ // Lacks specific purpose
-ApiService                          ❌ // Needs specific API context (e.g., TehnomirApi)
-UtilityService                      ❌ // Too vague
+DataService                         // Lacks specific purpose
+ApiService                          // Needs a specific upstream (e.g. SupplierApi)
+UtilityService                      // Too vague
 
 // Missing domain context
-Validator                           ❌ // Should be CartItemValidator
-Processor                           ❌ // Should be PartNamePostProcessor
+Validator                           // Should be CartItemValidator
+Processor                           // Should be PartNamePostProcessor
+```
+
+## Class Declaration Conventions
+
+- **Actions** are declared `final readonly class ... implements Actionable` (the default; some older Actions are still
+  plain `final`). They are stateless once constructed (constructor-injected dependencies only). `Actionable` is a marker
+  interface, so the uniform `handle()` entry point is a convention the team keeps, not something the compiler enforces.
+- **Stateless Services and DTOs** are declared `final readonly class`. Roughly a third of the Service classes in the
+  codebase use `final readonly`; the rest are plain `final` (often because they hold infra state or are wired before
+  the readonly convention).
+- **Infra Services that hold state** (API toggles, log/trace buffers) stay plain `final`.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Actions;
+
+/** @method handle() */
+interface Actionable
+{
+}
 ```
 
 ## File Organization
 
-### 📁 **Directory Structure:**
+### Directory Structure:
 
-Organize actions and services by domain to maintain clarity and scalability. Sub-domains (e.g., `OrderItem`,
-`SearchQuery`) are nested under their parent domain.
+Organize actions and services by domain. Sub-domains (e.g. `OrderItem`, `SearchQuery`) nest under their parent domain.
 
 ```
 app/
@@ -221,188 +303,223 @@ app/
 │   │   └── SearchDetailValidator.php
 │   ├── Supplier/
 │   │   └── DeliveryScheduleService.php
-│   ├── Tehnomir/
-│   │   └── TehnomirApi.php
+│   ├── Integration/
+│   │   └── SupplierApi.php
 ```
 
-## Best Practices
+## Practices
 
-### **Action Best Practices:**
+### Action Practices:
 
-1. **Single Responsibility**: Each action handles one business operation (e.g., `OrderCreateAction` creates an order,
-   not updates it).
-2. **Dependency Injection**: Inject dependencies via constructor (e.g., services, repositories).
-3. **Handle Method**: Use `handle()` as the main entry point for execution.
-4. **Type Safety**: Use strict types and return type declarations for clarity.
-5. **Exception Handling**: Let business exceptions bubble up to the caller or handle them explicitly in orchestrators.
-6. **Transactions**: Use database transactions for operations requiring atomicity.
+1. **Single responsibility**: each action handles one business operation (e.g. `OrderCreateAction` creates an order,
+   it does not also update one).
+2. **Dependency injection**: inject services, sub-actions, and repositories via the constructor.
+3. **Handle method**: use `handle()` as the entry point. `Actionable` is a marker that tags the class; the team keeps the signature uniform by convention.
+4. **Type safety**: strict types and return type declarations.
+5. **Exception handling**: let business exceptions bubble to the caller, or handle them explicitly in the orchestrator.
+6. **Transactions**: wrap atomic operations in a DB transaction. The Action owns the transaction boundary.
 
 ```php
-final class OrderCreateAction implements Actionable
+final readonly class OrderCreateAction implements Actionable
 {
     public function __construct(
-        private readonly OrderRepository $orderRepository,
-        private readonly OrderConditionService $orderConditionService,
-        private readonly OrderCartItemDTOsFetchAction $cartItemFetchAction,
-        private readonly OrderIssueNotificationAction $notificationAction
+        private OrderRepository $orderRepository,
+        private OrderCourierDateValidator $courierDateValidator,
+        private OrderCartItemDTOsFetchAction $cartItemFetchAction,
+        private OrderItemNotificationRepository $notificationRepository,
     ) {}
 
-    public function handle(OrderCreateDTO $dto): Order
+    public function handle(OrderCreateDTO $dto, int $userId): Order
     {
-        $this->orderConditionService->validate($dto);
-        
-        return DB::transaction(function() use ($dto) {
-            $cartItems = $this->cartItemFetchAction->handle($dto->userId);
-            $order = $this->orderRepository->create($dto);
-            $this->notificationAction->handle($order);
-            
+        $this->courierDateValidator->validate($dto->courierDate, $dto->addressId);
+
+        return DB::transaction(function () use ($dto, $userId) {
+            $cartItems = $this->cartItemFetchAction->handle($dto->items, $userId);
+            $order = $this->orderRepository->create($dto, $cartItems);
+            $this->notificationRepository->insert($order->items->toArray());
+
             return $order;
         });
     }
 }
 ```
 
-### 🔧 **Service Best Practices:**
+### Service Practices:
 
-1. **Stateless**: Avoid storing state in instance variables.
-2. **Pure Functions**: Ensure consistent output for the same input (e.g., `DeliveryScheduleService`).
-3. **Focused Interface**: Provide specific, well-defined methods (e.g., `calculateTotal` in `CartService`).
-4. **Reusable**: Design for use across multiple actions (e.g., `SearchResultService` used by multiple search actions).
-5. **Testable**: Write services to be easily unit-tested in isolation.
+1. **Prefer stateless**: most calculators hold no instance state. Keep it that way unless you are building infra
+   (cache toggles, log/trace buffers) where state is the point.
+2. **Prefer returning over mutating**: return new values rather than mutating a passed DTO in place.
+3. **Focused interface**: provide specific, well-named methods (e.g. `calculateTotal` on `CartService`).
+4. **Reusable where it makes sense**: many Services are reused across actions; some are single-use. Reusability is a
+   nice property, not a requirement.
+5. **Testable**: a Service should be unit-testable in isolation. Pure calculators are trivial to test; IO Services
+   are tested with fakes/mocks for the IO boundary.
+
+A pure calculator is the cleanest shape. The one below is illustrative. The real `DeliveryScheduleService` is heavier
+(it reads a supplier repository and currently mutates its DTO, the smell flagged above), so do not read it as the pure
+ideal:
 
 ```php
-final class DeliveryScheduleService
+final readonly class ShippingEstimateCalculator
 {
-    public function calculateSchedule(DateTime $orderDate, array $supplierRules): DateTime
+    public function estimate(CarbonImmutable $orderDate, int $leadTimeDays): CarbonImmutable
     {
-        // Pure function to calculate delivery schedule based on rules
-        $schedule = $this->applySupplierRules($orderDate, $supplierRules);
-        
-        return $schedule;
-    }
-    
-    private function applySupplierRules(DateTime $orderDate, array $rules): DateTime
-    {
-        // Implementation details
+        $deliveryDate = $orderDate->addDays($leadTimeDays);
+
+        // Skip weekends: suppliers do not ship Saturday/Sunday.
+        while ($deliveryDate->isWeekend()) {
+            $deliveryDate = $deliveryDate->addDay();
+        }
+
+        return $deliveryDate;
     }
 }
 ```
 
 ## Quick Decision: Action or Service?
 
-### 🤔 **Ask Yourself:**
+### Ask Yourself:
 
-1. **Is this a complete business operation?** → Action (e.g., `OrderCreateAction`).
-2. **Will this be reused across multiple actions?** → Service (e.g., `CartItemValidator`).
-3. **Does this have side effects (e.g., notifications, logging)?** → Action (e.g., `OrderIssueNotificationAction`).
-4. **Is this pure data processing or calculation?** → Service (e.g., `DeliveryScheduleService`).
-5. **Is this triggered by a user or event?** → Action (e.g., `CartItemAddAction`).
-6. **Is this domain-specific logic or infrastructure?** → Service (e.g., `TehnomirApi`).
+1. **Does outside code trigger this as one complete operation?** -> Action (e.g. `OrderCreateAction`).
+   This also covers anything triggered by a user, event, or HTTP/console/job entry point.
+2. **Does it dispatch a job/event, send a notification, or own a transaction?** -> Action. This is the hard signal.
+3. **Is it pure data processing, calculation, validation, or transformation?** -> Service
+   (e.g. `DeliveryScheduleService`, `CartItemValidator`).
+4. **Does it wrap a single external call?** -> Service (e.g. `SupplierApi`). Does it orchestrate an end-to-end
+   external operation built from several such wrappers? -> Action (e.g. `VehicleFindByVinAction`).
 
-### 📊 **Decision Matrix:**
+Reusability is not on this list on purpose: sub-actions get reused too, and some Services are single-use. Use it as a
+tie-breaker, not a deciding question.
 
-| Characteristic         | Action                                                          | Service                                                              |
-|------------------------|-----------------------------------------------------------------|----------------------------------------------------------------------|
-| **Primary Purpose**    | Execute complete business operations                            | Provide reusable business logic and utilities                        |
-| **Scope**              | End-to-end business process (create order, process checkout)    | Single responsibility within domain (validate, calculate, transform) |
-| **Reusability**        | Usually one-off, context-specific                               | Designed for reuse across multiple actions/contexts                  |
-| **Side Effects**       | Often has side effects (notifications, logging, cache clearing) | Pure/stateless operations with no side effects                       |
-| **Business Flow**      | Complete start-to-finish thing                                  | Partial step, not the whole journey                                  |
-| **What Triggers It?**  | User, events, HTTP calls                                        | Other code calls it (like Actions or other Services)                 |
-| **Complexity Level**   | High - orchestrates multiple steps/components                   | Low to Medium - focused on specific task                             |
-| **How Do You Run It?** | `handle()` is your go-to                                        | Multiple public methods, pick your poison                            |
-| **Laravel Style**      | Call it straight from your controller                           | Inject it into Actions                                               |
-| **Where's the Logic?** | Coordinates the business process                                | Holds the domain-specific know-how                                   |
+### Decision Matrix:
 
-### Examples: actions and services
+| Characteristic         | Action                                                       | Service                                                              |
+|------------------------|--------------------------------------------------------------|----------------------------------------------------------------------|
+| **Primary purpose**    | Run one complete business operation                          | Do one focused piece of work for an Action                           |
+| **Direction**          | Triggered from outside (controller, command, job, event)     | Called by an Action or another Service mid-operation                 |
+| **Scope**              | End-to-end process (create order, process checkout)          | Single step (validate, calculate, transform, wrap one call)          |
+| **Dispatch / events**  | May dispatch jobs/events, send notifications                 | Never dispatches jobs/events, never calls Actions                    |
+| **Transactions**       | Owns the transaction boundary                                | Runs inside the caller's transaction; does not open its own          |
+| **Side effects / IO**  | Orchestrates them                                            | May do IO (DB, HTTP, cache, files, logs); prefer no input mutation   |
+| **State**              | Stateless once constructed                                   | Prefer stateless; infra Services may hold toggle/buffer state        |
+| **Entry point**        | `handle()`, tagged by the `Actionable` marker                | One or more focused public methods                                   |
+| **Controller calls it**| Default: `controller -> Action`                              | Allowed only for a stateless read/validate with no orchestration     |
 
-| **Actions: Complete Business Operations**                                                     | **Services: Reusable Business Logic**                                        |
-|-----------------------------------------------------------------------------------------------|------------------------------------------------------------------------------|
-| **OrderCreateAction** - Creates an order, handles payment, inventory, fires off notifications | **CartItemValidator** - Checks if cart items play by your business rules     |
-| **CartCheckoutPossibilityAction** - Can you check out? Picks delivery dates                   | **DeliveryScheduleService** - Figures out delivery dates from supplier logic |
-| **VehicleFindByVinAction** - Digs through APIs, normalizes, caches                            | **PartNameNormalizerAI** - Makes part names less weird with some AI magic    |
-| **PriceImportUploadAction** - Handles file uploads, catches duplicates                        | **TehnomirApi** - Talks to external APIs and deals with their messiness      |
-| **SearchBrandGroupingAction** - Runs search, filters, groups brands                           | **SearchResultService** - Cleans up and tweaks your search results           |
-| **StatMetricDailyCollectAction** - Scoops up metrics, stores them, fires off reports          | **OrderConditionService** - Calculates discounts, shipping, payment terms    |
+Note on the controller line: `controller -> Action` is the default. A controller calling a Service directly is allowed
+only for a thin, stateless read or validation with no orchestration. Anything that touches more than one collaborator
+or writes data goes through an Action.
 
-## Action Composition & Splitting
+### Examples: Actions and Services
 
-### 🔗 **Composing Actions**
+| Actions: Complete Business Operations                                  | Services: Focused Collaborators                                              |
+|-----------------------------------------------------------------------|------------------------------------------------------------------------------|
+| **OrderCreateAction** - creates an order, fires notifications, owns the transaction | **CartItemValidator** - checks cart items against business rules   |
+| **CartCheckoutPossibilityAction** - decides if checkout is possible, picks delivery dates | **DeliveryScheduleService** - computes delivery dates from supplier rules |
+| **VehicleFindByVinAction** - calls several APIs, normalizes, caches    | **PartNameNormalizerAI** - normalizes part names via an external AI call     |
+| **PriceImportUploadAction** - handles uploads, catches duplicates      | **SupplierApi** - wraps one external API and its quirks                       |
+| **SearchBrandGroupingAction** - runs search, filters, groups brands    | **SearchResultService** - cleans up and reshapes search results              |
+| **StatMetricDailyCollectAction** - collects metrics, stores them, fires reports | **OrderConditionService** - computes discounts, shipping, payment terms |
 
-Actions can use both **Services** and other **Actions** as dependencies:
+## Repositories
+
+Persistence lives in a **Repository**, not inline in the Action. A Repository owns DB reads and writes for one model or
+aggregate (e.g. `OrderRepository`, `CurrentAuthUserRepository`). Actions call Repositories for persistence so the
+transaction body stays thin and the query logic stays in one place. Like Services, Repositories never call Actions and
+never dispatch. Think of them as the data-access flavour of a Service.
+
+## DTOs
+
+A **DTO** is the immutable, typed boundary the controller builds from the validated request. It is what you pass into
+`handle()`, not a loose array. Pass DTOs between layers, not associative arrays, so the contract is explicit and
+type-checked. DTOs are declared `final readonly` and should be treated as read-only inside Services (see the input
+mutation note above).
+
+## Action Composition and Splitting
+
+### Composing Actions
+
+Actions can depend on both **Services** and other **Actions** (sub-actions). The one-way rule:
+
+- Actions may depend on Services **and** Sub-Actions.
+- Services may depend on Services **only** (never Actions).
 
 ```php
-final class OrderCreateAction implements Actionable
+final readonly class OrderCreateAction implements Actionable
 {
     public function __construct(
         // Services for reusable logic
-        private readonly UserService $userService,
-        private readonly OrderConditionService $orderConditionService,
-        
-        // Sub-actions for discrete operations
-        private readonly OrderCartItemDTOsFetchAction $cartItemFetchAction,
-        private readonly OrderItemNotificationAction $notificationAction
+        private UserService $userService,
+        private OrderConditionService $orderConditionService,
+
+        // Sub-action for a discrete, reusable step
+        private OrderCartItemDTOsFetchAction $cartItemFetchAction,
+
+        // Repository for persistence
+        private OrderItemNotificationRepository $notificationRepository,
     ) {}
-    
+
     public function handle(OrderCreateDTO $dto, int $userId): Order
     {
-        // Use services for calculations
-        $conditions = $this->orderConditionService->calculateConditions($user, $items);
-        
-        // Use sub-actions for discrete steps
+        $user = $this->userService->resolve($userId);
+
+        // Use a sub-action for a discrete, reusable step.
         $cartItems = $this->cartItemFetchAction->handle($dto->items, $userId);
-        
-        return DB::transaction(function() use ($dto, $cartItems) {
-            $order = Order::create([...]);
-            
-            // Side effects via sub-actions
-            $this->notificationAction->handle($order);
-            
+
+        // Use a service for a calculation.
+        $conditions = $this->orderConditionService->calculateConditions($user, $cartItems);
+
+        return DB::transaction(function () use ($dto, $cartItems, $conditions) {
+            $order = Order::create([/* ... */]);
+
+            // Persist notification rows via a Repository.
+            $this->notificationRepository->insert($order->items->toArray());
+
             return $order;
         });
     }
 }
 ```
 
-### ✂️ **When to Split Actions**
+A reusable sub-action like `OrderCartItemDTOsFetchAction` is itself an entry point (it could be called from a command
+or another action), which is exactly why it is an Action and not a Service even though it mostly reads data.
 
-Split large actions when they have:
+### When to Split Actions
 
-- **Multiple unrelated responsibilities** (user validation + payment + inventory)
-- **Reusable components** that other actions could use
-- **Different transaction boundaries** (order creation vs payment processing)
-- **Complex conditional logic** that makes testing difficult
+Split a large action when it has:
+
+- **Multiple unrelated responsibilities** (user validation + payment + inventory).
+- **Reusable components** other actions could call.
+- **Different transaction boundaries** (order creation vs payment processing).
+- **Complex conditional logic** that makes testing hard.
 
 ```php
-// ❌ Too complex - handles too many concerns
+// Too complex - handles too many concerns
 OrderProcessAction
 
-// ✅ Split into focused actions
-OrderCreateAction           // Creates order
+// Split into focused actions
+OrderCreateAction           // Creates the order
 OrderPaymentProcessAction   // Handles payment
 OrderInventoryUpdateAction  // Updates inventory
 ```
 
-### 📏 **Composition Guidelines**
+### Composition Guidelines (guidance, not law)
 
-- **Actions can depend on Services + Sub-Actions** (max 5-8 total dependencies)
-  Actions orchestrate business operations, so they need both reusable logic (Services) and discrete steps (Sub-Actions).
-  The 5-8 limit prevents actions from becoming too complex and ensures they remain focused on their primary
-  responsibility.
-- **Services should only depend on other Services** (max 4-5 dependencies)
-  Services provide pure business logic and shouldn't trigger other business operations (Actions). Limiting to 4-5
-  dependencies keeps services focused and prevents them from becoming mini-orchestrators themselves.
-- **Avoid deep action chains** (A → B → C → D)
-- **One main transaction per action** - let orchestrator manage transaction scope
+- **Keep the dependency count low.** More than a handful of constructor dependencies is a signal to split, not a hard
+  cap. Some real actions legitimately carry a dozen because they orchestrate a genuinely large operation; treat a high
+  count as a smell to investigate, not a rule violation.
+- **Services depend on Services only.** A Service that needs to trigger another business operation is mis-classified -
+  it should be an Action.
+- **Avoid deep action chains** (A -> B -> C -> D). Prefer one orchestrator coordinating shallow steps.
+- **One main transaction per operation.** The top-level Action owns the transaction scope; sub-actions run inside it.
 
 ## Typical Laravel Controller Integration
 
-### 📝 **Overview**
+### Overview
 
-Laravel controllers handle HTTP requests, delegating logic to **Actions** and formatting responses with **API Resources
-**. They use **Form Requests**, **DTOs**, and **Repositories** for clean integration.
+Controllers handle HTTP, delegate logic to **Actions**, and format responses with **API Resources**. They use **Form
+Requests**, **DTOs**, and **Repositories** for clean integration. The default delegation is `controller -> Action`.
 
-### ✅ **Example: OrderController**
+### Example: OrderController
 
 ```php
 <?php
@@ -427,37 +544,42 @@ final class OrderController extends Controller
     public function store(
         OrderStoreRequest $request,
         CurrentAuthUserRepository $currentAuthUserRepository,
-        OrderCreateAction $orderCreateAction
-    ): OrderResource
-    {
+        OrderCreateAction $orderCreateAction,
+    ): OrderResource {
         $user = $currentAuthUserRepository->getApiCustomerUser();
         $validatedInput = $request->safe();
         $orderCreateDTO = new OrderCreateDTO(
             ip: $request->ip(),
             userAgent: $request->userAgent(),
             items: $validatedInput->input('items'),
-            directionTypeId: $validatedInput->input('direction_type_id')
+            directionTypeId: $validatedInput->input('direction_type_id'),
         );
         $order = $orderCreateAction->handle($orderCreateDTO, $user->id);
-        
+
         return OrderResource::make($order);
     }
 }
 ```
 
-### 🔧 **Key Components**
+The controller resolves the user via a Repository (a thin read, allowed directly), builds the DTO, and hands the whole
+operation to one Action. The same `OrderCreateAction->handle($dto, $userId)` can be invoked from an Artisan command or
+a queued job with no change, because an Action is context-free.
 
-- **Form Requests**: Validates requests (e.g., `OrderStoreRequest`).
-- **DTOs**: Structures data (e.g., `OrderCreateDTO`).
-- **API Resources**: Formats responses (e.g., `OrderResource`).
-- **Repositories**: Abstracts data access (e.g., `CurrentAuthUserRepository`).
-- **Actions**: Handles logic (e.g., `OrderCreateAction`).
+### Key Components
 
-### 🚨 **Exception Handling**
+- **Form Requests**: validate the request (e.g. `OrderStoreRequest`).
+- **DTOs**: the typed input contract (e.g. `OrderCreateDTO`).
+- **API Resources**: format the response (e.g. `OrderResource`).
+- **Repositories**: own data access (e.g. `CurrentAuthUserRepository`).
+- **Actions**: run the operation (e.g. `OrderCreateAction`).
 
-Actions throw custom exceptions (e.g., `UserCheckException`) for errors, formatted as JSON responses.
+### Exception Handling
 
-**Example: Custom Exception**
+Actions and Services throw custom business exceptions. A base exception carries its own `render()`, so a thrown
+exception turns itself into a JSON response without a controller `try/catch`. A marker interface,
+`BusinessExceptionShouldntReport`, opts an exception out of error reporting (expected validation failures, not bugs).
+
+**Custom exception:**
 
 ```php
 <?php
@@ -466,16 +588,16 @@ declare(strict_types=1);
 
 namespace App\Exceptions\BusinessExceptions\User;
 
-use App\Exceptions\Contracts\BusinessNotReportableException;
+use App\Exceptions\Contracts\BusinessExceptionShouldntReport;
 use App\Exceptions\Contracts\BusinessRenderException;
 
-final class UserCheckException extends BusinessRenderException implements BusinessNotReportableException
+final class UserCheckException extends BusinessRenderException implements BusinessExceptionShouldntReport
 {
     // Thrown with: throw new UserCheckException(messageKey: 'user.error.empty_price_type');
 }
 ```
 
-**Base Exception**
+**Base exception:**
 
 ```php
 <?php
@@ -496,11 +618,11 @@ class BusinessRenderException extends BusinessException implements HttpException
     public function __construct(
         ?string $userMessage = null,
         ?string $messageKey = null,
-        int $statusCode = Response::HTTP_UNPROCESSABLE_ENTITY
+        int $statusCode = Response::HTTP_UNPROCESSABLE_ENTITY,
     ) {
         $this->statusCode = $statusCode;
         $userMessage = $messageKey ? __($messageKey) : $userMessage;
-        
+
         parent::__construct($userMessage);
     }
 
@@ -511,14 +633,13 @@ class BusinessRenderException extends BusinessException implements HttpException
 }
 ```
 
-### 📏 **Controller Guidelines**
+### Controller Guidelines
 
-- Keep controllers thin, delegating to Actions.
+- Keep controllers thin; delegate to Actions.
 - Use dependency injection.
-- Leverage Form Requests, DTOs, API Resources.
-- Catch exceptions for HTTP responses.
+- Lean on Form Requests, DTOs, and API Resources.
+- Let business exceptions render themselves; reserve `try/catch` for genuinely exceptional handling.
 
-**Final Note:** These guidelines are flexible to accommodate your needs. Use them to maintain consistency and clarity,
-but adapt as necessary based on team conventions and evolving requirements. For any specific naming or organization
-decisions, discuss with your team to ensure alignment.
-
+**Final note:** these guidelines are flexible. The one non-negotiable is the invariant: Services never call Actions and
+never dispatch. Everything else is a default you can adapt to team conventions and the shape of the work, as long as
+the direction of dependencies stays clean.
