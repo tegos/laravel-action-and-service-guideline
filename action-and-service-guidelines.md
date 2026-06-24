@@ -24,6 +24,20 @@ enforces (verified: zero references to the `App\Actions` namespace and zero `dis
 If a class needs to trigger another business operation, fire a notification, or dispatch a job/event, it is an Action,
 not a Service. Everything else below is guidance; this one is a rule.
 
+The practical reason: a unit test of a Service that dispatches a job carries queue side effects. The boundary breaks.
+Return a value from the Service; let the Action decide what to dispatch next.
+
+Enforce this with a Pest architecture test:
+
+```php
+expect('App\Services')->not->toUse('App\Actions');
+```
+
+This catches violations before they reach code review.
+
+This invariant covers domain events and jobs that kick off downstream workflows. Framework-level lifecycle events -
+model observers, Eloquent events fired inside a model - are a separate concern.
+
 ## What a Service Actually Is
 
 A Service in this codebase is **a non-Action, non-Controller collaborator under `app/Services`**. In practice it spans
@@ -36,7 +50,8 @@ several shapes, and most are not pure or stateless. Be honest about this so the 
 - **External API clients** (e.g. `SupplierApi`, `OeCatalogApi`, `Erp1CApi`, `NovaPoshtaApi`, `OpendatabotApi`,
   `PartNameNormalizerAI`). Heavy IO: HTTP calls, credentials, caching, stats increments, exception reporting.
 - **DB-backed orchestrators / collectors** (e.g. `ProductSearchService`, `CartImportService`, `SupplierService`,
-  the image services that write models and touch the filesystem).
+  the image services that write models and touch the filesystem). If any of these have their own controller or command
+  entry point, they are likely Actions in disguise - check the direction rule.
 - **Cache / infra helpers** (e.g. `SearchArticleCacheService`, `OrderPrimaryKeyGenerator`, `GeoIpService`).
 
 **Prefer stateless, side-effect-free Services where you can** - the pure calculators are the easiest to test and
@@ -119,8 +134,16 @@ This is the distinction that actually separates an API Service from an Action th
 
 - **Domain**: the business context (e.g. `Order`, `Cart`, `Search`).
 - **Object**: the entity being acted upon, if applicable (e.g. `Item`, `Cart`, `Query`).
-- **Verb**: the action being performed (e.g. `Create`, `Cancel`, `Fetch`).
+- **Verb**: the action being performed (e.g. `Create`, `Cancel`, `Track`).
 - **Suffix**: always end with `Action`.
+
+**Community note:** the majority convention (lorisleiva, Spatie, Laravel Fortify) is verb-first: `CreateOrderAction`.
+Domain-first is a deliberate choice for projects with 30+ Actions where alphabetical grouping by domain has practical
+value - all order-related classes sort together in the IDE. Pick one convention and commit to it across the project.
+
+**Query Objects are not Actions.** A class that only reads data and returns a result with no side effects belongs in
+`app/Queries/`, not `app/Actions/`. Name it after the business question, not the database verb:
+`OrderCartItemsQuery` rather than `OrderCartItemDTOsFetchAction`. The folder name carries the read/write signal.
 
 ### Good Examples:
 
@@ -147,10 +170,17 @@ VehicleFindByVinAction              // Finds a vehicle by VIN
 #### Complex Operations:
 
 ```php
-OrderCartItemDTOsFetchAction        // Fetches cart item DTOs for an order
 SearchBrandGroupingAction           // Groups search results by brand
 PriceImportHandleDuplicateAction    // Handles duplicate price imports
 StatMetricDailyCollectAction        // Collects daily metrics
+```
+
+#### Query Objects (app/Queries/ - pure reads, no side effects):
+
+```php
+OrderCartItemsQuery                 // Fetches cart items for an order
+PendingOrdersQuery                  // Fetches pending orders
+UserCartQuery                       // Resolves the current user's cart
 ```
 
 ### Avoid These Patterns:
@@ -161,10 +191,11 @@ ProcessAction                       // Lacks domain context
 HandleAction                        // Too vague
 ExecuteAction                       // No clear purpose
 
-// Verb-first (inconsistent with domain-first)
+// Verb-first (if using domain-first convention)
 CreateOrderAction                   // Should be OrderCreateAction
 UpdateSupplierAction                // Should be SupplierUpdateAction
 SendNotificationAction              // Should be domain-first, e.g. OrderItemNotifyAction
+// Note: verb-first is the community majority - if adopting it, flip the above examples
 
 // Missing domain context
 ItemCancelAction                    // Should be OrderItemCancelAction
@@ -223,9 +254,13 @@ Erp1CApi                            // Wraps the ERP 1C system
 
 ```php
 OrderConditionService               // Computes order conditions
-SupplierService                     // Supplier-related logic
+SupplierService                     // Supplier-related logic (watch: broad name is a God class in the making)
 ProductCrossService                 // Product cross-references
 ```
+
+> **`SupplierService` warning:** "Supplier-related logic" is a description of a bucket class, not a focused collaborator.
+> Before adding to it, ask whether the logic belongs in a more specific class (`SupplierPricingService`,
+> `SupplierDisplayQuantityService`). A Service that grows beyond one focused concern is a design smell.
 
 ### Avoid These Patterns:
 
@@ -274,8 +309,7 @@ app/
 ├── Actions/
 │   ├── Cart/
 │   │   ├── CartCheckoutPossibilityAction.php
-│   │   ├── CartItemAddAction.php
-│   │   └── CartItemDTOsFetchAction.php
+│   │   └── CartItemAddAction.php
 │   ├── Order/
 │   │   ├── OrderCreateAction.php
 │   │   ├── OrderCancelAction.php
@@ -286,11 +320,16 @@ app/
 │   │   ├── SearchAction.php
 │   │   ├── SearchFilterAction.php
 │   │   └── SearchQuery/
-│   │       ├── SearchQueryTrackLogAction.php
+│   │       ├── SearchQueryLogAction.php
 │   │       └── SearchQueryHistoryAction.php
 │   ├── Supplier/
 │   │   ├── SupplierCreateAction.php
 │   │   └── SupplierScheduleBatchAction.php
+├── Queries/                         <- pure reads: no side effects, no dispatching
+│   ├── Cart/
+│   │   └── OrderCartItemsQuery.php  <- replaces OrderCartItemDTOsFetchAction
+│   └── Order/
+│       └── PendingOrdersQuery.php
 ├── Services/
 │   ├── Cart/
 │   │   ├── CartService.php
@@ -314,10 +353,16 @@ app/
 1. **Single responsibility**: each action handles one business operation (e.g. `OrderCreateAction` creates an order,
    it does not also update one).
 2. **Dependency injection**: inject services, sub-actions, and repositories via the constructor.
-3. **Handle method**: use `handle()` as the entry point. `Actionable` is a marker that tags the class; the team keeps the signature uniform by convention.
+3. **Handle method**: use `handle()` as the entry point. `Actionable` is a marker that tags the class; the team keeps
+   the signature uniform by convention. Spatie uses `execute()` instead to avoid a double-injection edge case when
+   an Action is injected into a job's own `handle()` method - either works, `handle()` is the team default here.
 4. **Type safety**: strict types and return type declarations.
 5. **Exception handling**: let business exceptions bubble to the caller, or handle them explicitly in the orchestrator.
 6. **Transactions**: wrap atomic operations in a DB transaction. The Action owns the transaction boundary.
+7. **Authorization**: `$this->authorize()` and permission checks belong in the controller or Form Request, before
+   the Action is called. The Action assumes the caller has already verified authorization.
+8. **Background execution**: if an Action needs to run asynchronously, create a Job that calls `$action->handle()`.
+   Keep the Action synchronous; the Job is the async wrapper. Do not implement `ShouldQueue` on the Action itself.
 
 ```php
 final readonly class OrderCreateAction implements Actionable
@@ -325,7 +370,7 @@ final readonly class OrderCreateAction implements Actionable
     public function __construct(
         private OrderRepository $orderRepository,
         private OrderCourierDateValidator $courierDateValidator,
-        private OrderCartItemDTOsFetchAction $cartItemFetchAction,
+        private OrderCartItemsQuery $cartItemsQuery,        // Query Object, not Action - pure read
         private OrderItemNotificationRepository $notificationRepository,
     ) {}
 
@@ -334,7 +379,7 @@ final readonly class OrderCreateAction implements Actionable
         $this->courierDateValidator->validate($dto->courierDate, $dto->addressId);
 
         return DB::transaction(function () use ($dto, $userId) {
-            $cartItems = $this->cartItemFetchAction->handle($dto->items, $userId);
+            $cartItems = $this->cartItemsQuery->handle($dto->items, $userId);
             $order = $this->orderRepository->create($dto, $cartItems);
             $this->notificationRepository->insert($order->items->toArray());
 
@@ -387,6 +432,8 @@ final readonly class ShippingEstimateCalculator
    (e.g. `DeliveryScheduleService`, `CartItemValidator`).
 4. **Does it wrap a single external call?** -> Service (e.g. `SupplierApi`). Does it orchestrate an end-to-end
    external operation built from several such wrappers? -> Action (e.g. `VehicleFindByVinAction`).
+5. **Does it only read data and return a result with no side effects?** -> Query Object. Put it in `app/Queries/`
+   and name it after the business question: `OrderCartItemsQuery` rather than `OrderCartItemDTOsFetchAction`.
 
 Reusability is not on this list on purpose: sub-actions get reused too, and some Services are single-use. Use it as a
 tie-breaker, not a deciding question.
@@ -451,8 +498,8 @@ final readonly class OrderCreateAction implements Actionable
         private UserService $userService,
         private OrderConditionService $orderConditionService,
 
-        // Sub-action for a discrete, reusable step
-        private OrderCartItemDTOsFetchAction $cartItemFetchAction,
+        // Query Object: pure read, no side effects - lives in app/Queries/
+        private OrderCartItemsQuery $cartItemsQuery,
 
         // Repository for persistence
         private OrderItemNotificationRepository $notificationRepository,
@@ -462,16 +509,16 @@ final readonly class OrderCreateAction implements Actionable
     {
         $user = $this->userService->resolve($userId);
 
-        // Use a sub-action for a discrete, reusable step.
-        $cartItems = $this->cartItemFetchAction->handle($dto->items, $userId);
+        // Query Object: pure read, no dispatching, no transaction ownership.
+        $cartItems = $this->cartItemsQuery->handle($dto->items, $userId);
 
-        // Use a service for a calculation.
+        // Service: a calculation.
         $conditions = $this->orderConditionService->calculateConditions($user, $cartItems);
 
         return DB::transaction(function () use ($dto, $cartItems, $conditions) {
             $order = Order::create([/* ... */]);
 
-            // Persist notification rows via a Repository.
+            // Repository: persist notification rows.
             $this->notificationRepository->insert($order->items->toArray());
 
             return $order;
@@ -480,8 +527,10 @@ final readonly class OrderCreateAction implements Actionable
 }
 ```
 
-A reusable sub-action like `OrderCartItemDTOsFetchAction` is itself an entry point (it could be called from a command
-or another action), which is exactly why it is an Action and not a Service even though it mostly reads data.
+`OrderCartItemsQuery` lives in `app/Queries/Cart/`, not `app/Actions/`. It only reads data and returns a collection -
+no side effects, no dispatching, no transaction. "Could theoretically be called from a command" is not sufficient to
+make something an Action. The deciding question is whether the class owns a business operation: does it write, dispatch,
+or own a transaction? A pure read that another class calls mid-operation is a Query Object or a Service, not an Action.
 
 ### When to Split Actions
 
@@ -567,7 +616,11 @@ a queued job with no change, because an Action is context-free.
 
 ### Key Components
 
-- **Form Requests**: validate the request (e.g. `OrderStoreRequest`).
+- **Form Requests**: validate the request shape (e.g. `OrderStoreRequest`). HTTP layer only - required fields,
+  types, formats. Not business rules.
+- **Validator Services**: validate business rules (e.g. `OrderCourierDateValidator` checks delivery date feasibility
+  against supplier schedules). These live in `app/Services/` and may read the DB. The split: Form Request handles
+  "is this valid input?"; Validator Service handles "is this valid for the business?".
 - **DTOs**: the typed input contract (e.g. `OrderCreateDTO`).
 - **API Resources**: format the response (e.g. `OrderResource`).
 - **Repositories**: own data access (e.g. `CurrentAuthUserRepository`).
@@ -639,6 +692,59 @@ class BusinessRenderException extends BusinessException implements HttpException
 - Use dependency injection.
 - Lean on Form Requests, DTOs, and API Resources.
 - Let business exceptions render themselves; reserve `try/catch` for genuinely exceptional handling.
+
+## Testing
+
+### Actions
+
+Test Actions with **feature/integration tests**. Call through a real HTTP request or via `app()->call()` / `$this->app->make(OrderCreateAction::class)->handle(...)`. Assert the full outcome: the database state, dispatched jobs, sent notifications. Avoid mocking the Action's own collaborators in feature tests - if the collaborators are wrong, you want the test to catch it.
+
+```php
+it('creates an order and queues notification', function () {
+    $user = User::factory()->create();
+    $dto  = new OrderCreateDTO(/* ... */);
+
+    $order = app(OrderCreateAction::class)->handle($dto, $user->id);
+
+    expect($order)->toBeInstanceOf(Order::class);
+    Queue::assertPushed(SendOrderConfirmationJob::class);
+});
+```
+
+### Services
+
+Test Services with **unit tests**. Inject fakes or mocks only for IO boundaries (HTTP clients, cache, DB). Assert return values and thrown exceptions, not internal calls.
+
+```php
+it('calculates vat correctly', function () {
+    $vat = new OrderVatService();
+
+    expect($vat->calculate(1000, 0.2))->toBe(200);
+});
+```
+
+For DB-backed Services, use a real in-memory SQLite database or `RefreshDatabase` rather than a query mock - mocked queries have a long history of masking real migration issues.
+
+### Query Objects
+
+Test Query Objects with **integration tests** against a real DB (or seeded dataset). They are read-only so no teardown beyond the database transaction rollback is needed.
+
+### Architecture tests
+
+Enforce the hard invariant automatically:
+
+```php
+arch('services never reference actions', function () {
+    expect('App\Services')->not->toUse('App\Actions');
+});
+
+arch('query objects are read-only', function () {
+    expect('App\Queries')->not->toUse('Illuminate\Support\Facades\DB');
+    // or more specifically: not to call DB::statement, DB::insert, etc.
+});
+```
+
+---
 
 **Final note:** these guidelines are flexible. The one non-negotiable is the invariant: Services never call Actions and
 never dispatch. Everything else is a default you can adapt to team conventions and the shape of the work, as long as
