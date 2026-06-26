@@ -141,9 +141,9 @@ This is the distinction that actually separates an API Service from an Action th
 Domain-first is a deliberate choice for projects with 30+ Actions where alphabetical grouping by domain has practical
 value - all order-related classes sort together in the IDE. Pick one convention and commit to it across the project.
 
-**Query Objects are not Actions.** A class that only reads data and returns a result with no side effects belongs in
-`app/Queries/`, not `app/Actions/`. Name it after the business question, not the database verb:
-`OrderCartItemsQuery` rather than `OrderCartItemDTOsFetchAction`. The folder name carries the read/write signal.
+**Pure-read collaborators are Services, not Actions.** A class that only reads, assembles, or transforms data - no
+transaction ownership, no dispatch, no notifications - belongs in `app/Services/`, not `app/Actions/`. Name it after
+what it builds or does: `CartItemDtoFactory` rather than `OrderCartItemDTOsFetchAction`.
 
 ### Good Examples:
 
@@ -173,14 +173,6 @@ VehicleFindByVinAction              // Finds a vehicle by VIN
 SearchBrandGroupingAction           // Groups search results by brand
 PriceImportHandleDuplicateAction    // Handles duplicate price imports
 StatMetricDailyCollectAction        // Collects daily metrics
-```
-
-#### Query Objects (app/Queries/ - pure reads, no side effects):
-
-```php
-OrderCartItemsQuery                 // Fetches cart items for an order
-PendingOrdersQuery                  // Fetches pending orders
-UserCartQuery                       // Resolves the current user's cart
 ```
 
 ### Avoid These Patterns:
@@ -325,15 +317,11 @@ app/
 │   ├── Supplier/
 │   │   ├── SupplierCreateAction.php
 │   │   └── SupplierScheduleBatchAction.php
-├── Queries/                         <- pure reads: no side effects, no dispatching
-│   ├── Cart/
-│   │   └── OrderCartItemsQuery.php  <- replaces OrderCartItemDTOsFetchAction
-│   └── Order/
-│       └── PendingOrdersQuery.php
 ├── Services/
 │   ├── Cart/
 │   │   ├── CartService.php
-│   │   └── CartItemValidator.php
+│   │   ├── CartItemValidator.php
+│   │   └── CartItemDtoFactory.php   <- assembles CartItemDTOs; Service, not Action
 │   ├── Order/
 │   │   ├── OrderConditionService.php
 │   │   └── RequestReturnQuantityValidator.php
@@ -370,7 +358,7 @@ final readonly class OrderCreateAction implements Actionable
     public function __construct(
         private OrderRepository $orderRepository,
         private OrderCourierDateValidator $courierDateValidator,
-        private OrderCartItemsQuery $cartItemsQuery,        // Query Object, not Action - pure read
+        private CartItemDtoFactory $cartItemDtoFactory,     // Service collaborator, not Action - pure assembly
         private OrderItemNotificationRepository $notificationRepository,
     ) {}
 
@@ -379,7 +367,7 @@ final readonly class OrderCreateAction implements Actionable
         $this->courierDateValidator->validate($dto->courierDate, $dto->addressId);
 
         return DB::transaction(function () use ($dto, $userId) {
-            $cartItems = $this->cartItemsQuery->handle($dto->items, $userId);
+            $cartItems = $this->cartItemDtoFactory->fetchForOrderFromCart($userId);
             $order = $this->orderRepository->create($dto, $cartItems);
             $this->notificationRepository->insert($order->items->toArray());
 
@@ -432,8 +420,9 @@ final readonly class ShippingEstimateCalculator
    (e.g. `DeliveryScheduleService`, `CartItemValidator`).
 4. **Does it wrap a single external call?** -> Service (e.g. `SupplierApi`). Does it orchestrate an end-to-end
    external operation built from several such wrappers? -> Action (e.g. `VehicleFindByVinAction`).
-5. **Does it only read data and return a result with no side effects?** -> Query Object. Put it in `app/Queries/`
-   and name it after the business question: `OrderCartItemsQuery` rather than `OrderCartItemDTOsFetchAction`.
+5. **Does it only read, assemble, or transform data - no transaction, no dispatch, no notifications?** -> Service
+   collaborator. Put it in `app/Services/` and name it after what it builds or does: `CartItemDtoFactory` rather than
+   `OrderCartItemDTOsFetchAction`.
 
 Reusability is not on this list on purpose: sub-actions get reused too, and some Services are single-use. Use it as a
 tie-breaker, not a deciding question.
@@ -498,8 +487,8 @@ final readonly class OrderCreateAction implements Actionable
         private UserService $userService,
         private OrderConditionService $orderConditionService,
 
-        // Query Object: pure read, no side effects - lives in app/Queries/
-        private OrderCartItemsQuery $cartItemsQuery,
+        // Service collaborator: assembles CartItemDTOs, no transaction, no dispatch
+        private CartItemDtoFactory $cartItemDtoFactory,
 
         // Repository for persistence
         private OrderItemNotificationRepository $notificationRepository,
@@ -509,8 +498,8 @@ final readonly class OrderCreateAction implements Actionable
     {
         $user = $this->userService->resolve($userId);
 
-        // Query Object: pure read, no dispatching, no transaction ownership.
-        $cartItems = $this->cartItemsQuery->handle($dto->items, $userId);
+        // Service: pure assembly, no side effects - belongs in app/Services/, not app/Actions/.
+        $cartItems = $this->cartItemDtoFactory->fetchForOrderFromCart($userId);
 
         // Service: a calculation.
         $conditions = $this->orderConditionService->calculateConditions($user, $cartItems);
@@ -527,10 +516,11 @@ final readonly class OrderCreateAction implements Actionable
 }
 ```
 
-`OrderCartItemsQuery` lives in `app/Queries/Cart/`, not `app/Actions/`. It only reads data and returns a collection -
-no side effects, no dispatching, no transaction. "Could theoretically be called from a command" is not sufficient to
-make something an Action. The deciding question is whether the class owns a business operation: does it write, dispatch,
-or own a transaction? A pure read that another class calls mid-operation is a Query Object or a Service, not an Action.
+`CartItemDtoFactory` lives in `app/Services/Cart/`, not `app/Actions/`. It reads, assembles, and returns a collection -
+no dispatching, no transaction ownership. "Could theoretically be called from a command" is not sufficient to make
+something an Action. The deciding question is whether the class owns a business operation: does it write, dispatch, or
+own a transaction? A class that only assembles data for another class mid-operation is a Service collaborator, not an
+Action.
 
 ### When to Split Actions
 
