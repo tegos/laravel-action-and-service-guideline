@@ -51,7 +51,7 @@ several shapes, and most are not pure or stateless. Be honest about this so the 
   `PartNameNormalizerAI`). Heavy IO: HTTP calls, credentials, caching, stats increments, exception reporting.
 - **DB-backed orchestrators / collectors** (e.g. `ProductSearchService`, `CartImportService`, `SupplierService`,
   the image services that write models and touch the filesystem). If any of these have their own controller or command
-  entry point, they are likely Actions in disguise - check the direction rule.
+  entry point, they are likely Actions, not Services - check the direction rule.
 - **Cache / infra helpers** (e.g. `SearchArticleCacheService`, `OrderPrimaryKeyGenerator`, `GeoIpService`).
 
 **Prefer stateless, side-effect-free Services where you can** - the pure calculators are the easiest to test and
@@ -87,7 +87,7 @@ jobs/events. That is the line, not purity.
 ```php
 OrderCreateAction                     // Creates an order across multiple steps
 SearchAction                          // Orchestrates search with filtering and sorting
-CartItemAddAction                     // Adds an item to the cart
+CartItemStoreAction                   // Stores an item in the cart
 CommunicationCloseConversationAction  // Closes a user conversation
 PriceExportDownloadAction             // Downloads exported price data
 ```
@@ -152,7 +152,7 @@ what it builds or does: `CartItemDtoFactory` rather than `OrderCartItemDTOsFetch
 ```php
 OrderCreateAction                   // Creates an order
 OrderIndexAction                    // Lists orders
-CartDestroyAction                   // Deletes a cart
+CartDeleteAction                    // Deletes a cart
 SupplierUpdateAction                // Updates supplier details
 UserProfileAction                   // Retrieves user profile
 ```
@@ -161,7 +161,7 @@ UserProfileAction                   // Retrieves user profile
 
 ```php
 OrderCancelAction                   // Cancels an order
-CartItemAddAction                   // Adds an item to the cart
+CartItemStoreAction                 // Stores an item in the cart
 CartCheckoutPossibilityAction       // Checks if cart is ready for checkout
 PriceImportUploadAction             // Uploads price import data
 VehicleFindByVinAction              // Finds a vehicle by VIN
@@ -170,8 +170,8 @@ VehicleFindByVinAction              // Finds a vehicle by VIN
 #### Complex Operations:
 
 ```php
-SearchBrandGroupingAction           // Groups search results by brand
-PriceImportHandleDuplicateAction    // Handles duplicate price imports
+SearchAction                        // Orchestrates search; filters and groups via Services
+PriceImportCompleteAction           // Finalizes a price import run
 StatMetricDailyCollectAction        // Collects daily metrics
 ```
 
@@ -301,7 +301,7 @@ app/
 ├── Actions/
 │   ├── Cart/
 │   │   ├── CartCheckoutPossibilityAction.php
-│   │   └── CartItemAddAction.php
+│   │   └── CartItemStoreAction.php
 │   ├── Order/
 │   │   ├── OrderCreateAction.php
 │   │   ├── OrderCancelAction.php
@@ -310,7 +310,7 @@ app/
 │   │       └── OrderItemUpdateStatusAction.php
 │   ├── Search/
 │   │   ├── SearchAction.php
-│   │   ├── SearchFilterAction.php
+│   │   ├── SearchSupplierAction.php
 │   │   └── SearchQuery/
 │   │       ├── SearchQueryLogAction.php
 │   │       └── SearchQueryHistoryAction.php
@@ -382,7 +382,7 @@ final readonly class OrderCreateAction implements Actionable
 1. **Prefer stateless**: most calculators hold no instance state. Keep it that way unless you are building infra
    (cache toggles, log/trace buffers) where state is the point.
 2. **Prefer returning over mutating**: return new values rather than mutating a passed DTO in place.
-3. **Focused interface**: provide specific, well-named methods (e.g. `calculateTotal` on `CartService`).
+3. **Focused interface**: provide specific, well-named methods (e.g. `getActiveItems` on `CartService`).
 4. **Reusable where it makes sense**: many Services are reused across actions; some are single-use. Reusability is a
    nice property, not a requirement.
 5. **Testable**: a Service should be unit-testable in isolation. Pure calculators are trivial to test; IO Services
@@ -435,7 +435,7 @@ tie-breaker, not a deciding question.
 | **Direction**          | Triggered from outside (controller, command, job, event)     | Called by an Action or another Service mid-operation                 |
 | **Scope**              | End-to-end process (create order, process checkout)          | Single step (validate, calculate, transform, wrap one call)          |
 | **Dispatch / events**  | May dispatch jobs/events, send notifications                 | Never dispatches jobs/events, never calls Actions                    |
-| **Transactions**       | Owns the transaction boundary                                | Runs inside the caller's transaction; does not open its own          |
+| **Transactions**       | Owns the transaction boundary                                | Usually runs inside the caller's transaction; a self-contained Service may open its own |
 | **Side effects / IO**  | Orchestrates them                                            | May do IO (DB, HTTP, cache, files, logs); prefer no input mutation   |
 | **State**              | Stateless once constructed                                   | Prefer stateless; infra Services may hold toggle/buffer state        |
 | **Entry point**        | `handle()`, tagged by the `Actionable` marker                | One or more focused public methods                                   |
@@ -453,7 +453,7 @@ or writes data goes through an Action.
 | **CartCheckoutPossibilityAction** - decides if checkout is possible, picks delivery dates | **DeliveryScheduleService** - computes delivery dates from supplier rules |
 | **VehicleFindByVinAction** - calls several APIs, normalizes, caches    | **PartNameNormalizerAI** - normalizes part names via an external AI call     |
 | **PriceImportUploadAction** - handles uploads, catches duplicates      | **SupplierApi** - wraps one external API and its quirks                       |
-| **SearchBrandGroupingAction** - runs search, filters, groups brands    | **SearchResultService** - cleans up and reshapes search results              |
+| **SearchAction** - orchestrates search; delegates filtering and grouping to Services | **SearchBrandGroupingService** - groups search results by brand               |
 | **StatMetricDailyCollectAction** - collects metrics, stores them, fires reports | **OrderConditionService** - computes discounts, shipping, payment terms |
 
 ## Repositories
@@ -479,6 +479,20 @@ Actions can depend on both **Services** and other **Actions** (sub-actions). The
 - Actions may depend on Services **and** Sub-Actions.
 - Services may depend on Services **only** (never Actions).
 
+But "Sub-Action" is a label you have to earn. A class is an Action only if it is itself an entry point (a
+controller, command, job, or event could invoke it), **or** it dispatches a job/event/notification, **or** it owns a
+transaction. A class that only filters, groups, transforms, validates, or reads - and is reached only from inside
+another Action - is a Service, whatever the suffix says. The test: if nothing outside `app/Actions` would ever call it,
+and it neither dispatches nor owns a transaction, it is a collaborator, not an entry point.
+
+> **Cautionary tale from this codebase.** A search pipeline once carried `SearchBrandGroupingAction`,
+> `SearchAllowedSuppliersFilterAction`, `SearchRejectRulesFilterAction`, and `SearchedDetailAction` as sub-Actions of
+> `SearchAction`. None dispatched, none owned a transaction, and none was ever called from outside `SearchAction`. They
+> were Services, not Actions. They are now `SearchBrandGroupingService::group()`,
+> `SearchAllowedSuppliersFilterService::filter()`, `SearchRejectRulesFilterService::filter()`, and
+> `SearchDetailResolver::resolve()`. The orchestrating Action did not change shape - it just stopped lying about what it
+> injects.
+
 ```php
 final readonly class OrderCreateAction implements Actionable
 {
@@ -496,13 +510,13 @@ final readonly class OrderCreateAction implements Actionable
 
     public function handle(OrderCreateDTO $dto, int $userId): Order
     {
-        $user = $this->userService->resolve($userId);
+        $priceTypeUser = $this->userService->getPriceTypeUser($userId);
 
         // Service: pure assembly, no side effects - belongs in app/Services/, not app/Actions/.
         $cartItems = $this->cartItemDtoFactory->fetchForOrderFromCart($userId);
 
         // Service: a calculation.
-        $conditions = $this->orderConditionService->calculateConditions($user, $cartItems);
+        $conditions = $this->orderConditionService->calculateConditions($userId, $priceTypeUser, $cartItems);
 
         return DB::transaction(function () use ($dto, $cartItems, $conditions) {
             $order = Order::create([/* ... */]);
@@ -516,11 +530,9 @@ final readonly class OrderCreateAction implements Actionable
 }
 ```
 
-`CartItemDtoFactory` lives in `app/Services/Cart/`, not `app/Actions/`. It reads, assembles, and returns a collection -
-no dispatching, no transaction ownership. "Could theoretically be called from a command" is not sufficient to make
-something an Action. The deciding question is whether the class owns a business operation: does it write, dispatch, or
-own a transaction? A class that only assembles data for another class mid-operation is a Service collaborator, not an
-Action.
+`CartItemDtoFactory` lives in `app/Services/Cart/`, not `app/Actions/`: it reads, assembles, and returns a collection,
+owning no business operation - no write of its own, no dispatch, no transaction. The same test from the caveat above
+applies here.
 
 ### When to Split Actions
 
@@ -549,7 +561,7 @@ OrderInventoryUpdateAction  // Updates inventory
 - **Services depend on Services only.** A Service that needs to trigger another business operation is mis-classified -
   it should be an Action.
 - **Avoid deep action chains** (A -> B -> C -> D). Prefer one orchestrator coordinating shallow steps.
-- **One main transaction per operation.** The top-level Action owns the transaction scope; sub-actions run inside it.
+- **One main transaction per operation.** The top-level Action usually owns the transaction scope and sub-actions run inside it. This is the default, not a hard rule: a self-contained Service that guarantees its own atomicity (for example a recalculation Service) may open its own transaction when it is the unit of work. Just do not nest a second transaction inside an Action that already owns one.
 
 ## Typical Laravel Controller Integration
 
@@ -715,10 +727,6 @@ it('calculates vat correctly', function () {
 
 For DB-backed Services, use a real in-memory SQLite database or `RefreshDatabase` rather than a query mock - mocked queries have a long history of masking real migration issues.
 
-### Query Objects
-
-Test Query Objects with **integration tests** against a real DB (or seeded dataset). They are read-only so no teardown beyond the database transaction rollback is needed.
-
 ### Architecture tests
 
 Enforce the hard invariant automatically:
@@ -726,11 +734,6 @@ Enforce the hard invariant automatically:
 ```php
 arch('services never reference actions', function () {
     expect('App\Services')->not->toUse('App\Actions');
-});
-
-arch('query objects are read-only', function () {
-    expect('App\Queries')->not->toUse('Illuminate\Support\Facades\DB');
-    // or more specifically: not to call DB::statement, DB::insert, etc.
 });
 ```
 
