@@ -27,13 +27,14 @@ not a Service. Everything else below is guidance; this one is a rule.
 The practical reason: a unit test of a Service that dispatches a job carries queue side effects. The boundary breaks.
 Return a value from the Service; let the Action decide what to dispatch next.
 
-Enforce this with a Pest architecture test:
+You can enforce the namespace half with a Pest architecture test:
 
 ```php
 expect('App\Services')->not->toUse('App\Actions');
 ```
 
-This catches violations before they reach code review.
+This catches namespace violations before they reach code review. The no-dispatch half is not expressible as a
+`toUse` rule - it stays a convention checked in review, backed by the `dispatch(` grep above.
 
 This invariant covers domain events and jobs that kick off downstream workflows. Framework-level lifecycle events -
 model observers, Eloquent events fired inside a model - are a separate concern.
@@ -79,7 +80,8 @@ jobs/events. That is the line, not purity.
 - **Orchestrating multiple services or sub-actions** toward a business goal (e.g. processing a search with filters
   and sorting).
 - **Transactional workflows** requiring atomicity (e.g. creating an order inside a DB transaction).
-- **Operations that dispatch** notifications, jobs, or events, or that own the transaction. This is the hard signal.
+- **Operations that dispatch** notifications, jobs, or events, or that own the transaction. When present this is
+  decisive - but most Actions qualify by orchestration alone and never dispatch, so its absence proves nothing.
 - **Complex multi-step business processes** (e.g. a cart checkout).
 
 **Examples:**
@@ -134,7 +136,9 @@ This is the distinction that actually separates an API Service from an Action th
 
 - **Domain**: the business context (e.g. `Order`, `Cart`, `Search`).
 - **Object**: the entity being acted upon, if applicable (e.g. `Item`, `Cart`, `Query`).
-- **Verb**: the action being performed (e.g. `Create`, `Cancel`, `Track`).
+- **Verb**: the action being performed (e.g. `Create`, `Cancel`, `Track`). Required for **command** Actions that
+  change state; **query/read** Actions may be noun-phrased with no verb (e.g. `UserProfileAction`,
+  `CartTotalAmountAction`, `OrderConditionAction`) - a forced verb there reads awkwardly.
 - **Suffix**: always end with `Action`.
 
 **Community note:** the majority convention (lorisleiva, Spatie, Laravel Fortify) is verb-first: `CreateOrderAction`.
@@ -415,7 +419,8 @@ final readonly class ShippingEstimateCalculator
 
 1. **Does outside code trigger this as one complete operation?** -> Action (e.g. `OrderCreateAction`).
    This also covers anything triggered by a user, event, or HTTP/console/job entry point.
-2. **Does it dispatch a job/event, send a notification, or own a transaction?** -> Action. This is the hard signal.
+2. **Does it dispatch a job/event, send a notification, or own a transaction?** -> Action. A sufficient signal -
+   present means Action - but most Actions orchestrate without dispatching, so absence does not rule it out (see step 1).
 3. **Is it pure data processing, calculation, validation, or transformation?** -> Service
    (e.g. `DeliveryScheduleService`, `CartItemValidator`).
 4. **Does it wrap a single external call?** -> Service (e.g. `SupplierApi`). Does it orchestrate an end-to-end
@@ -460,8 +465,10 @@ or writes data goes through an Action.
 
 Persistence lives in a **Repository**, not inline in the Action. A Repository owns DB reads and writes for one model or
 aggregate (e.g. `OrderRepository`, `CurrentAuthUserRepository`). Actions call Repositories for persistence so the
-transaction body stays thin and the query logic stays in one place. Like Services, Repositories never call Actions and
-never dispatch. Think of them as the data-access flavour of a Service.
+transaction body stays thin and the query logic stays in one place. Like Services, Repositories never call Actions.
+They rarely dispatch; a pure-persistence Repository never does, but an integration Repository that syncs external
+data may fire a job/event (e.g. `OpendatabotRepository` dispatches a track-log job on lookup). Think of them as the
+data-access flavour of a Service.
 
 ## DTOs
 
