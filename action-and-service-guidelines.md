@@ -1,5 +1,7 @@
 # Action and Service Guidelines with Naming Conventions
 
+> Companion article: [Laravel Actions and Services](https://dev.to/tegos/laravel-actions-and-services-360d) - the why behind this reference; this document is the what and how.
+
 ## Overview
 
 This guideline defines when to use **Actions** and **Services** in a Laravel application, provides naming conventions,
