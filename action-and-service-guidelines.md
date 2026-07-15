@@ -8,6 +8,23 @@ This guideline defines when to use **Actions** and **Services** in a Laravel app
 and outlines practices for organizing and implementing them. The goal is consistency, maintainability, and a codebase
 where any developer can predict where a piece of logic lives and how it is invoked.
 
+## Contents
+
+- [The Core Rule: Direction Decides It](#the-core-rule-direction-decides-it)
+- [What a Service Actually Is](#what-a-service-actually-is)
+- [When to Use Actions and Services](#when-to-use-actions-and-services)
+- [Action Naming Conventions](#action-naming-conventions)
+- [Service Naming Conventions](#service-naming-conventions)
+- [Class Declaration Conventions](#class-declaration-conventions)
+- [File Organization](#file-organization)
+- [Practices](#practices)
+- [Quick Decision: Action or Service?](#quick-decision-action-or-service)
+- [Repositories](#repositories)
+- [DTOs](#dtos)
+- [Action Composition and Splitting](#action-composition-and-splitting)
+- [Typical Laravel Controller Integration](#typical-laravel-controller-integration)
+- [Testing](#testing)
+
 ## The Core Rule: Direction Decides It
 
 Before any checklist or matrix, there is one rule that the codebase actually obeys:
@@ -26,8 +43,12 @@ enforces (verified: zero references to the `App\Actions` namespace and zero `dis
 If a class needs to trigger another business operation, fire a notification, or dispatch a job/event, it is an Action,
 not a Service. Everything else below is guidance; this one is a rule.
 
-The practical reason: a unit test of a Service that dispatches a job carries queue side effects. The boundary breaks.
-Return a value from the Service; let the Action decide what to dispatch next.
+The reason is not testability - Laravel's `Queue::fake()` / `Event::fake()` make dispatching code easy to test. It is
+that orchestration stays legible when it lives in one layer: read any Action and you see the whole operation, including
+what it fires; Services stay predictable because they only ever compute and return. So return a value from the Service
+and let the Action decide what to dispatch next. (One seam: an integration Repository that syncs external data may
+dispatch a tracking job - see [Repositories](#repositories). That is the narrow exception, and such classes live under
+`app/Repositories`, which is why the `app/Services` grep stays clean.)
 
 You can enforce the namespace half with a Pest architecture test:
 
@@ -36,7 +57,9 @@ expect('App\Services')->not->toUse('App\Actions');
 ```
 
 This catches namespace violations before they reach code review. The no-dispatch half is not expressible as a
-`toUse` rule - it stays a convention checked in review, backed by the `dispatch(` grep above.
+`toUse` rule - it stays a convention checked in review, backed by the `dispatch(` grep above. (The snippet needs
+`pestphp/pest` with `pestphp/pest-plugin-arch`; on a PHPUnit-only suite, express the same rule with your
+architecture-testing tool of choice.)
 
 This invariant covers domain events and jobs that kick off downstream workflows. Framework-level lifecycle events -
 model observers, Eloquent events fired inside a model - are a separate concern.
@@ -46,16 +69,15 @@ model observers, Eloquent events fired inside a model - are a separate concern.
 A Service in this codebase is **a non-Action, non-Controller collaborator under `app/Services`**. In practice it spans
 several shapes, and most are not pure or stateless. Be honest about this so the guidance matches reality:
 
-- **Pure calculators / transformers** (e.g. `CartService`, `SupplierDisplayQuantityService`,
-  `RelatedArticleChainBuilder`, the `PartName` post-processors). The smallest, most testable group.
-- **Validators** (e.g. `CartItemValidator`, `SearchDetailValidator`, `OrderCourierDateValidator`). Return `void`,
-  throw on failure. Some are pure; some read the DB. A DB-reading validator is still a Service.
-- **External API clients** (e.g. `SupplierApi`, `OeCatalogApi`, `Erp1CApi`, `NovaPoshtaApi`, `OpendatabotApi`,
-  `PartNameNormalizerAI`). Heavy IO: HTTP calls, credentials, caching, stats increments, exception reporting.
-- **DB-backed orchestrators / collectors** (e.g. `ProductSearchService`, `CartImportService`, `SupplierService`,
-  the image services that write models and touch the filesystem). If any of these have their own controller or command
-  entry point, they are likely Actions, not Services - check the direction rule.
-- **Cache / infra helpers** (e.g. `SearchArticleCacheService`, `OrderPrimaryKeyGenerator`, `GeoIpService`).
+- **Pure calculators / transformers** (e.g. `CartService`, `SupplierDisplayQuantityService`). The smallest, most
+  testable group.
+- **Validators** (e.g. `CartItemValidator`, `OrderCourierDateValidator`). Return `void`, throw on failure. Some are
+  pure; some read the DB. A DB-reading validator is still a Service.
+- **External API clients** (e.g. `SupplierApi`, `NovaPoshtaApi`). Heavy IO: HTTP calls, credentials, caching, stats
+  increments, exception reporting.
+- **DB-backed orchestrators / collectors** (e.g. `ProductSearchService`, `SupplierService`). If any of these have their
+  own controller or command entry point, they are likely Actions, not Services - check the direction rule.
+- **Cache / infra helpers** (e.g. `SearchArticleCacheService`, `GeoIpService`).
 
 **Prefer stateless, side-effect-free Services where you can** - the pure calculators are the easiest to test and
 reuse. But IO-heavy Services are fine and normal. A Service may freely do DB reads/writes, HTTP, cache, filesystem,
@@ -82,8 +104,8 @@ jobs/events. That is the line, not purity.
 - **Orchestrating multiple services or sub-actions** toward a business goal (e.g. processing a search with filters
   and sorting).
 - **Transactional workflows** requiring atomicity (e.g. creating an order inside a DB transaction).
-- **Operations that dispatch** notifications, jobs, or events, or that own the transaction. When present this is
-  decisive - but most Actions qualify by orchestration alone and never dispatch, so its absence proves nothing.
+- **Operations that dispatch** notifications, jobs, or events, or that own the transaction. Dispatch is a one-way
+  tell: present, it means Action; absent, it tells you nothing, since most Actions orchestrate without dispatching.
 - **Complex multi-step business processes** (e.g. a cart checkout).
 
 **Examples:**
@@ -128,6 +150,14 @@ This is the distinction that actually separates an API Service from an Action th
 - **Orchestrates an end-to-end external operation** built from those wrappers -> Action: `VehicleFindByVinAction`
   (calls several API clients, normalizes, caches, returns a result for the controller).
 
+### When not to bother
+
+Not every operation earns an Action. Reach for one when the operation **owns a transaction, dispatches, or coordinates
+two or more collaborators**. Below that line - a single read, a one-field update - a controller calling a Repository
+(or the model) directly is the right amount of structure. Do not manufacture a Service for a one-caller calculation
+either; inline it until a second caller appears. The pattern pays off when there is real orchestration or real reuse to
+contain, and it is pure overhead when there is not.
+
 ## Action Naming Conventions
 
 ### General Pattern:
@@ -140,12 +170,17 @@ This is the distinction that actually separates an API Service from an Action th
 - **Object**: the entity being acted upon, if applicable (e.g. `Item`, `Cart`, `Query`).
 - **Verb**: the action being performed (e.g. `Create`, `Cancel`, `Track`). Required for **command** Actions that
   change state; **query/read** Actions may be noun-phrased with no verb (e.g. `UserProfileAction`,
-  `CartTotalAmountAction`, `OrderConditionAction`) - a forced verb there reads awkwardly.
+  `CartTotalAmountAction`, `OrderIndexAction`) - a forced verb there reads awkwardly.
 - **Suffix**: always end with `Action`.
 
 **Community note:** the majority convention (lorisleiva, Spatie, Laravel Fortify) is verb-first: `CreateOrderAction`.
 Domain-first is a deliberate choice for projects with 30+ Actions where alphabetical grouping by domain has practical
 value - all order-related classes sort together in the IDE. Pick one convention and commit to it across the project.
+
+**On read-only Actions:** some in the community (Nuno Maduro among them) keep reads out of Actions entirely - in the
+controller or a query/view-model class. This guide allows noun-phrased read Actions when they own a real read operation
+(assembling a profile, totaling a cart). If a read is a one-liner, keep it in the controller; do not wrap a single
+query in an Action just for symmetry.
 
 **Pure-read collaborators are Services, not Actions.** A class that only reads, assembles, or transforms data - no
 transaction ownership, no dispatch, no notifications - belongs in `app/Services/`, not `app/Actions/`. Name it after
@@ -358,6 +393,9 @@ app/
 8. **Background execution**: if an Action needs to run asynchronously, create a Job that calls `$action->handle()`.
    Keep the Action synchronous; the Job is the async wrapper. Do not implement `ShouldQueue` on the Action itself.
 
+The example below is trimmed to essentials; the real `OrderCreateAction` injects more collaborators. A fuller view of
+the same Action - through the composition lens - appears under [Action Composition and Splitting](#action-composition-and-splitting).
+
 ```php
 final readonly class OrderCreateAction implements Actionable
 {
@@ -395,8 +433,8 @@ final readonly class OrderCreateAction implements Actionable
    are tested with fakes/mocks for the IO boundary.
 
 A pure calculator is the cleanest shape. The one below is illustrative. The real `DeliveryScheduleService` is heavier
-(it reads a supplier repository and currently mutates its DTO, the smell flagged above), so do not read it as the pure
-ideal:
+(it reads a supplier repository and currently mutates its DTO in place, the same input-mutation smell flagged earlier
+for `SupplierDisplayQuantityService`), so do not read it as the pure ideal:
 
 ```php
 final readonly class ShippingEstimateCalculator
@@ -417,12 +455,34 @@ final readonly class ShippingEstimateCalculator
 
 ## Quick Decision: Action or Service?
 
+Work top-down; first match wins. This routes to all four layers, not just Action vs Service:
+
+```
+Q1. Just a typed, immutable input/output bag, no behavior?
+      -> DTO        (final readonly, app/DataTransferObjects/)
+Q2. Its whole job is reading/writing persistence for ONE model/aggregate,
+    with no business calculation of its own?
+      -> REPOSITORY (app/Repositories/; name <Model>Repository)
+                    (a sync/integration repo MAY dispatch a track/log job; a pure one never does)
+Q3. Invoked as ONE COMPLETE operation from an entry point
+    (controller, command, job, event) - OR it dispatches a job/event,
+    sends a notification, or OWNS a multi-write transaction?
+      -> ACTION     (app/Actions/; entry method handle(); implements Actionable)
+Q4. Reached only from inside an Action/Service, never dispatches, never owns
+    a transaction - it calculates, validates, transforms, formats, assembles,
+    or wraps ONE external call?
+      -> SERVICE    (app/Services/)
+
+Hard invariant: a Service never calls an Action and never dispatches.
+If you land on SERVICE but it wants to dispatch, you mis-classified - recheck Q3.
+```
+
 ### Ask Yourself:
 
 1. **Does outside code trigger this as one complete operation?** -> Action (e.g. `OrderCreateAction`).
    This also covers anything triggered by a user, event, or HTTP/console/job entry point.
-2. **Does it dispatch a job/event, send a notification, or own a transaction?** -> Action. A sufficient signal -
-   present means Action - but most Actions orchestrate without dispatching, so absence does not rule it out (see step 1).
+2. **Does it dispatch a job/event, send a notification, or own a transaction?** -> Action. (One-way tell - present
+   means Action; absent rules nothing out, since most Actions orchestrate without dispatching. See step 1.)
 3. **Is it pure data processing, calculation, validation, or transformation?** -> Service
    (e.g. `DeliveryScheduleService`, `CartItemValidator`).
 4. **Does it wrap a single external call?** -> Service (e.g. `SupplierApi`). Does it orchestrate an end-to-end
@@ -465,9 +525,12 @@ or writes data goes through an Action.
 
 ## Repositories
 
-Persistence lives in a **Repository**, not inline in the Action. A Repository owns DB reads and writes for one model or
-aggregate (e.g. `OrderRepository`, `CurrentAuthUserRepository`). Actions call Repositories for persistence so the
-transaction body stays thin and the query logic stays in one place. Like Services, Repositories never call Actions.
+Persistence can live in a **Repository** rather than inline in the Action - but both are common, and inline is not a
+smell. In practice many Actions write Eloquent directly inside their transaction, and that is fine for a simple write.
+Reach for a Repository when a query is reused, gnarly, or worth naming in one place; a Repository that only proxies
+`Model::find` is pure ceremony, so skip it. A Repository owns DB reads and writes for one model or aggregate (e.g.
+`OrderRepository`, `CurrentAuthUserRepository`), which keeps the transaction body thin and the query logic in one spot.
+Like Services, Repositories never call Actions.
 They rarely dispatch; a pure-persistence Repository never does, but an integration Repository that syncs external
 data may fire a job/event (e.g. `OpendatabotRepository` dispatches a track-log job on lookup). Think of them as the
 data-access flavour of a Service.
@@ -502,6 +565,9 @@ and it neither dispatches nor owns a transaction, it is a collaborator, not an e
 > `SearchDetailResolver::resolve()`. The orchestrating Action did not change shape - it just stopped lying about what it
 > injects.
 
+Here is that same `OrderCreateAction` from [Action Practices](#practices), viewed through the composition lens - which
+Services and Repositories it wires, and why each is a collaborator rather than a sub-Action:
+
 ```php
 final readonly class OrderCreateAction implements Actionable
 {
@@ -513,7 +579,8 @@ final readonly class OrderCreateAction implements Actionable
         // Service collaborator: assembles CartItemDTOs, no transaction, no dispatch
         private CartItemDtoFactory $cartItemDtoFactory,
 
-        // Repository for persistence
+        // Repositories for persistence
+        private OrderRepository $orderRepository,
         private OrderItemNotificationRepository $notificationRepository,
     ) {}
 
@@ -528,7 +595,7 @@ final readonly class OrderCreateAction implements Actionable
         $conditions = $this->orderConditionService->calculateConditions($userId, $priceTypeUser, $cartItems);
 
         return DB::transaction(function () use ($dto, $cartItems, $conditions) {
-            $order = Order::create([/* ... */]);
+            $order = $this->orderRepository->create($dto, $cartItems, $conditions);
 
             // Repository: persist notification rows.
             $this->notificationRepository->insert($order->items->toArray());
@@ -571,6 +638,27 @@ OrderInventoryUpdateAction  // Updates inventory
   it should be an Action.
 - **Avoid deep action chains** (A -> B -> C -> D). Prefer one orchestrator coordinating shallow steps.
 - **One main transaction per operation.** The top-level Action usually owns the transaction scope and sub-actions run inside it. This is the default, not a hard rule: a self-contained Service that guarantees its own atomicity (for example a recalculation Service) may open its own transaction when it is the unit of work. Just do not nest a second transaction inside an Action that already owns one.
+
+A self-contained Service that owns its transaction - `CartItemPriceRecalculationService`, invoked top-level from a job
+or command, with no enclosing Action transaction:
+
+```php
+final readonly class CartItemPriceRecalculationService
+{
+    public function recalculateForUser(int $userId): void
+    {
+        // ... gather the user's cart items and fresh supplier prices ...
+
+        DB::transaction(function () use (/* ... */) {
+            // re-price the whole cart in one atomic unit
+        });
+    }
+}
+```
+
+This is legitimate precisely because the Service *is* the unit of work: nothing wraps it in a larger transaction. Reached
+from inside an Action that already owns a transaction, the same class would just run in that transaction and not open its
+own.
 
 ## Typical Laravel Controller Integration
 
@@ -643,6 +731,22 @@ Actions and Services throw custom business exceptions. A base exception carries 
 exception turns itself into a JSON response without a controller `try/catch`. A marker interface,
 `BusinessExceptionShouldntReport`, opts an exception out of error reporting (expected validation failures, not bugs).
 
+**Who throws.** Throw the specific exception where the rule lives - usually the Service. A validator or calculator owns
+its failure mode and throws at the exact point a check fails (`CartItemValidator` throws `CartCheckException`). An Action
+throws for its own preconditions before it opens the transaction, and may catch a low-level failure at the boundary it
+owns and rethrow it as a domain exception the caller understands:
+
+```php
+try {
+    return DB::transaction(fn () => /* ... */);
+} catch (Throwable $e) {
+    throw new OrderCheckException(userMessage: __('order.error.not_created'), previous: $e);
+}
+```
+
+Rule of thumb: throw the precise exception where the rule is (usually the Service); wrap only when the Action adds
+meaning the caller needs - that the operation failed as a whole.
+
 **Custom exception:**
 
 ```php
@@ -657,7 +761,7 @@ use App\Exceptions\Contracts\BusinessRenderException;
 
 final class UserCheckException extends BusinessRenderException implements BusinessExceptionShouldntReport
 {
-    // Thrown with: throw new UserCheckException(messageKey: 'user.error.empty_price_type');
+    // Thrown with: throw new UserCheckException(userMessage: __('user.error.empty_price_type'));
 }
 ```
 
@@ -674,25 +778,30 @@ use App\Http\Responses\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 class BusinessRenderException extends BusinessException implements HttpExceptionInterface
 {
-    private int $statusCode;
-
     public function __construct(
         ?string $userMessage = null,
-        ?string $messageKey = null,
-        int $statusCode = Response::HTTP_UNPROCESSABLE_ENTITY,
+        private readonly int $statusCode = Response::HTTP_UNPROCESSABLE_ENTITY,
     ) {
-        $this->statusCode = $statusCode;
-        $userMessage = $messageKey ? __($messageKey) : $userMessage;
-
         parent::__construct($userMessage);
     }
 
     public function render(Request $request): JsonResponse
     {
         return ApiResponse::errorResponse(message: $this->getUserMessage(), status: $this->getStatusCode());
+    }
+
+    public function getStatusCode(): int
+    {
+        return $this->statusCode;
+    }
+
+    public function getHeaders(): array
+    {
+        return [];
     }
 }
 ```
@@ -722,6 +831,10 @@ it('creates an order and queues notification', function () {
 });
 ```
 
+The one thing worth faking even in an Action test is a true external boundary - an upstream API client or integration
+Repository - so the test never hits the network. Mock that interface, keep every internal Service real, and assert the
+resulting database state.
+
 ### Services
 
 Test Services with **unit tests**. Inject fakes or mocks only for IO boundaries (HTTP clients, cache, DB). Assert return values and thrown exceptions, not internal calls.
@@ -745,6 +858,17 @@ arch('services never reference actions', function () {
     expect('App\Services')->not->toUse('App\Actions');
 });
 ```
+
+### Review checklist
+
+Before merging a change that adds Actions or Services:
+
+- [ ] Each new class resolves to exactly one of DTO / Repository / Action / Service via the decision above.
+- [ ] Nothing under `app/Services` dispatches a job/event or references `App\Actions` (arch test green).
+- [ ] Actions expose `handle()` and are the only thing a controller/command/job/listener invokes directly.
+- [ ] Class name follows its layer's grammar (`[Domain][Object][Verb]Action` / `[Domain][Purpose]Service`).
+- [ ] No second transaction nested inside an Action that already owns one.
+- [ ] DTOs cross layer boundaries (not associative arrays) and are not mutated inside Services.
 
 ---
 
