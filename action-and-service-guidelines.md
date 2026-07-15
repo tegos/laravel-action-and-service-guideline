@@ -43,6 +43,42 @@ enforces (verified: zero references to the `App\Actions` namespace and zero `dis
 If a class needs to trigger another business operation, fire a notification, or dispatch a job/event, it is an Action,
 not a Service. Everything else below is guidance; this one is a rule.
 
+```mermaid
+flowchart TD
+  LIS(["Event listener"])
+  JOB(["Queued job"])
+  CMD(["Artisan command"])
+  CTRL(["HTTP controller"])
+
+  ACT["Action
+handle()"]
+
+  SVC["Service"]
+  SVC2["Service"]
+  REPO["Repository"]
+  DISP[/"Job, Event, Notification"/]
+
+  LIS --> ACT
+  JOB --> ACT
+  CMD --> ACT
+  CTRL --> ACT
+
+  ACT --> SVC
+  ACT --> REPO
+  ACT -- "dispatches" --> DISP
+
+  SVC --> SVC2
+  SVC --> REPO
+
+  SVC -. "✕ never" .-> ACT
+  SVC -. "✕ never" .-> DISP
+```
+
+*Calls run one way: any entry point into an Action, the Action down into Services and Repositories. Only the Action
+dispatches. Nothing calls back up. The Action usually owns the transaction, though a self-contained Service invoked
+top-level may own its own. The seams the diagram leaves out - an integration Repository that dispatches, a thin
+controller read that skips the Action - are covered in the sections below.*
+
 The reason is not testability - Laravel's `Queue::fake()` / `Event::fake()` make dispatching code easy to test. It is
 that orchestration stays legible when it lives in one layer: read any Action and you see the whole operation, including
 what it fires; Services stay predictable because they only ever compute and return. So return a value from the Service
