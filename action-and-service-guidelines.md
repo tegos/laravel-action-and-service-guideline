@@ -65,7 +65,7 @@ handle()"]
 
   ACT --> SVC
   ACT --> REPO
-  ACT -- "dispatches" --> DISP
+  ACT -- "may dispatch" --> DISP
 
   SVC --> SVC2
   SVC --> REPO
